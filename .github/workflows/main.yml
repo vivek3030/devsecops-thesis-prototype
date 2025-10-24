@@ -35,10 +35,8 @@ jobs:
       - name: Verify Go Module Files
         run: |
           if [[ ! -f app/go.mod || ! -f app/go.sum ]]; then
-            echo "Error: app/go.mod or app/go.sum missing. Generating them..."
-            cd app
-            go mod init github.com/${{ github.repository }}
-            go mod tidy
+            echo "Error: app/go.mod or app/go.sum missing. Please commit these files."
+            exit 1
           else
             echo "app/go.mod and app/go.sum found."
           fi
@@ -66,7 +64,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: app/Dockerfile  # Fixed to match repository structure
+          file: app/Dockerfile
           push: false
           load: true
           tags: ${{ steps.meta.outputs.tags }}
