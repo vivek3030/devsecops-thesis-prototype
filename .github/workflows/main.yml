@@ -1,0 +1,223 @@
+# This is the main artifact of the thesis (Chapter 5)
+# It implements the 4-stage framework: Build, Analyze, Enforce, Attest
+name: DevSecOps Secure Supply Chain
+
+on:
+  push:
+    branches: [ "main" ] # Triggers on push to main
+  pull_request:
+    branches: [ "main" ] # Triggers on PR to main
+  workflow_dispatch:      # Allows manual triggering
+
+# Global env variables
+env:
+  # The GitHub Container Registry to push to
+  REGISTRY: ghcr.io
+  # The name of the image, based on the repository name
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  #========================================
+  # JOB 1: BUILD & ANALYZE
+  # (Builds the image, generates SBOM, scans for vulnerabilities)
+  #========================================
+  build:
+    name: 1 - Build and Analyze
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # Read repo content
+      packages: write # Write packages (push Docker image)
+
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }} # Output the image tag for other jobs
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # This step logs into the GitHub Container Registry
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # This step generates a unique tag for the Docker image based on the commit SHA
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=,format=short
+
+      # --- STAGE 1: BUILD ---
+      # This builds the Docker image locally
+      - name: Build Docker image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: . # Build from the root directory
+          file: ./app/Dockerfile # Path to the Dockerfile
+          push: false # DO NOT push yet. We need to scan it.
+          load: true # Load the image into the local Docker daemon to be scanned
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      # --- STAGE 2: ANALYZE (SBOM) ---
+      # Runs Syft to generate the SBOM from the image we just built
+      - name: Generate SBOM (Syft)
+        uses: anchore/syft-action@v0
+        with:
+          image: ${{ steps.meta.outputs.tags }}
+          format: cyclone-dx-json # Use CycloneDX format
+          output: bom.json # Save to this file
+
+      # --- STAGE 2: ANALYZE (Scan) ---
+      # Runs Grype to scan the SBOM for vulnerabilities
+      - name: Scan for Vulnerabilities (Grype)
+        uses: anchore/grype-action@v3
+        with:
+          sbom: bom.json # Tell Grype to scan the SBOM file directly
+          output: vulnerabilities.json # Save the report as JSON
+          fail-on-severity: "none" # Do not fail here. We let OPA decide.
+
+      # Upload artifacts for the policy-gate job
+      - name: Upload Artifacts (SBOM & Scan)
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports
+          path: |
+            bom.json
+            vulnerabilities.json
+
+      # Upload the Docker image itself as an artifact
+      - name: Upload Docker Image Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp/docker-image.tar
+      
+      # (This is a workaround to save the image for the next job)
+      - name: Save Docker image to tarball
+        run: docker save ${{ steps.meta.outputs.tags }} -o /tmp/docker-image.tar
+
+
+  #========================================
+  # JOB 2: ENFORCE (The Security Gate)
+  # (Uses OPA to check the reports)
+  #========================================
+  policy-gate:
+    name: 2 - Enforce Security Policy
+    runs-on: ubuntu-latest
+    needs: [build] # This job runs only after 'build' succeeds
+
+    steps:
+      - name: Checkout repository (for OPA policy file)
+        uses: actions/checkout@v4
+
+      - name: Download security reports
+        uses: actions/download-artifact@v4
+        with:
+          name: security-reports
+          path: .
+
+      - name: Install Open Policy Agent (OPA)
+        run: |
+          curl -L -o opa https://openpolicyagent.org/downloads/latest/opa_linux_amd64
+          chmod +x ./opa
+
+      # --- STAGE 3: ENFORCE ---
+      # This is the core logic of the security gate
+      - name: Create OPA Input JSON
+        run: |
+          # Combine the Grype and Syft reports into one JSON file for OPA
+          jq -n --slurpfile grype vulnerabilities.json --slurpfile syft bom.json \
+            '{"vulnerabilities": $grype[0], "sbom": $syft[0]}' > input.json
+          echo "Generated input.json for OPA:"
+          cat input.json | jq .
+
+      - name: Run OPA Policy Gate
+        run: |
+          # Run OPA. If the policy (allow) is false, this will exit 1 and fail the build.
+          ./opa eval --fail \
+            --input input.json \
+            --data policy/policy.rego \
+            "data.main.allow"
+          echo "OPA Policy PASSED"
+
+
+  #========================================
+  # JOB 3: ATTEST & PUBLISH
+  # (Signs the image with Sigstore and pushes)
+  #========================================
+  sign-and-publish:
+    name: 3 - Attest and Publish
+    runs-on: ubuntu-latest
+    needs: [policy-gate] # Only runs if the policy gate PASSED
+    permissions:
+      contents: read
+      packages: write # Required to push to GitHub Packages
+      id-token: write # Required for keyless signing with Sigstore
+
+    steps:
+      - name: Download Docker Image Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp
+
+      - name: Load Docker image
+        run: docker load -i /tmp/docker-image.tar
+      
+      - name: Get Image Tag
+        id: image_tag
+        run: echo "tag=$(docker images --format '{{.Repository}}:{{.Tag}}' | head -n 1)" >> $GITHUB_OUTPUT
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Sigstore/cosign
+        uses: sigstore/cosign-installer@v3
+
+      # --- STAGE 4: ATTEST & SIGN ---
+      # This is the "keyless signing" step
+      - name: Sign the image with Sigstore
+        run: |
+          cosign sign \
+            --yes \
+            ${{ steps.image_tag.outputs.tag }}
+        env:
+          COSIGN_EXPERIMENTAL: 1 # Required for keyless signing
+
+      # Download the SBOM again to attach it
+      - name: Download SBOM report
+        uses: actions/download-artifact@v4
+        with:
+          name: security-reports
+          path: .
+
+      # Attach the SBOM as a "spdx" attestation
+      - name: Attach SBOM Attestation
+        run: |
+          cosign attest \
+            --yes \
+            --type spdx \
+            --predicate bom.json \
+            ${{ steps.image_tag.outputs.tag }}
+        env:
+          COSIGN_EXPERIMENTAL: 1
+
+      # --- STAGE 4: PUBLISH ---
+      - name: Push signed image to registry
+        run: |
+          docker push ${{ steps.image_tag.outputs.tag }}
+
