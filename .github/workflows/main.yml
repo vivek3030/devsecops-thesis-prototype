@@ -52,7 +52,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile # Adjust to ./app/Dockerfile if needed
+          file: Dockerfile  # Adjust to ./app/Dockerfile if needed
           push: false
           load: true
           tags: ${{ steps.meta.outputs.tags }}
@@ -67,7 +67,7 @@ jobs:
           file: bom.json
 
       - name: Scan for Vulnerabilities (Grype)
-        uses: anchore/scan-action@v0
+        uses: anchore/scan-action@v6  # Updated to valid version
         with:
           sbom-file: bom.json
           output: vulnerabilities.json
