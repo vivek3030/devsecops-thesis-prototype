@@ -1,5 +1,6 @@
 # This is the main artifact of the thesis (Chapter 5)
 # It implements the 4-stage framework: Build, Analyze, Enforce, Attest
+
 name: DevSecOps Secure Supply Chain
 
 on:
@@ -86,6 +87,10 @@ jobs:
           output: vulnerabilities.json # Save the report as JSON
           fail-on-severity: "none" # Do not fail here. We let OPA decide.
 
+      # (This is a workaround to save the image for the next job)
+      - name: Save Docker image to tarball
+        run: docker save ${{ steps.meta.outputs.tags }} -o /tmp/docker-image.tar
+
       # Upload artifacts for the policy-gate job
       - name: Upload Artifacts (SBOM & Scan)
         uses: actions/upload-artifact@v4
@@ -101,11 +106,6 @@ jobs:
         with:
           name: docker-image
           path: /tmp/docker-image.tar
-      
-      # (This is a workaround to save the image for the next job)
-      - name: Save Docker image to tarball
-        run: docker save ${{ steps.meta.outputs.tags }} -o /tmp/docker-image.tar
-
 
   #========================================
   # JOB 2: ENFORCE (The Security Gate)
@@ -150,7 +150,6 @@ jobs:
             "data.main.allow"
           echo "OPA Policy PASSED"
 
-
   #========================================
   # JOB 3: ATTEST & PUBLISH
   # (Signs the image with Sigstore and pushes)
@@ -173,7 +172,7 @@ jobs:
 
       - name: Load Docker image
         run: docker load -i /tmp/docker-image.tar
-      
+
       - name: Get Image Tag
         id: image_tag
         run: echo "tag=$(docker images --format '{{.Repository}}:{{.Tag}}' | head -n 1)" >> $GITHUB_OUTPUT
@@ -220,4 +219,3 @@ jobs:
       - name: Push signed image to registry
         run: |
           docker push ${{ steps.image_tag.outputs.tag }}
-
