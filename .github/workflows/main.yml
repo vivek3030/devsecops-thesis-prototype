@@ -5,21 +5,16 @@ name: DevSecOps Secure Supply Chain
 
 on:
   push:
-    branches: [ "main" ] # Triggers on push to main
+    branches: [ "main" ]
   pull_request:
-    branches: [ "main" ] # Triggers on PR to main
-  workflow_dispatch:      # Allows manual triggering
+    branches: [ "main" ]
+  workflow_dispatch:
 
-# Global env variables
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  #========================================
-  # JOB 1: BUILD & ANALYZE
-  # (Builds the image, generates SBOM, scans for vulnerabilities)
-  #========================================
   build:
     name: 1 - Build and Analyze
     runs-on: ubuntu-latest
@@ -28,7 +23,7 @@ jobs:
       packages: write
 
     outputs:
-      image_tag: ${{ steps.meta.outputs.tags }} # Use .tags instead of .version
+      image_tag: ${{ steps.meta.outputs.tags }}
 
     steps:
       - name: Checkout repository
@@ -52,19 +47,17 @@ jobs:
           tags: |
             type=sha,prefix=,format=short
 
-      # --- STAGE 1: BUILD ---
       - name: Build Docker image
         id: build
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./app/Dockerfile # Verify this path
+          file: Dockerfile # Adjust to ./app/Dockerfile if needed
           push: false
           load: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
-      # --- STAGE 2: ANALYZE (SBOM) ---
       - name: Generate SBOM (Syft)
         uses: anchore/sbom-action@v0
         with:
@@ -73,7 +66,6 @@ jobs:
           format: cyclonedx
           file: bom.json
 
-      # --- STAGE 2: ANALYZE (Scan) ---
       - name: Scan for Vulnerabilities (Grype)
         uses: anchore/scan-action@v0
         with:
@@ -93,23 +85,19 @@ jobs:
           path: |
             bom.json
             vulnerabilities.json
+          retention-days: 7
 
       - name: Upload Docker Image Artifact
         uses: actions/upload-artifact@v4
         with:
           name: docker-image
           path: /tmp/docker-image.tar
+          retention-days: 7
 
-  #========================================
-  # JOB 2: ENFORCE (The Security Gate)
-  # (Uses OPA to check the reports)
-  #========================================
   policy-gate:
     name: 2 - Enforce Security Policy
     runs-on: ubuntu-latest
     needs: [build]
-    permissions:
-      artifacts: read
 
     steps:
       - name: Checkout repository (for OPA policy file)
@@ -123,7 +111,7 @@ jobs:
 
       - name: Install Open Policy Agent (OPA)
         run: |
-          curl -L -o opa https://openpolicyagent.org/downloads/latest/opa_linux_amd64
+          curl -L -o opa https://openpolicyagent.org/downloads/v0.71.0/opa_linux_amd64
           chmod +x ./opa
 
       - name: Create OPA Input JSON
@@ -147,10 +135,6 @@ jobs:
             exit 1
           fi
 
-  #========================================
-  # JOB 3: ATTEST & PUBLISH
-  # (Signs the image with Sigstore and pushes)
-  #========================================
   sign-and-publish:
     name: 3 - Attest and Publish
     runs-on: ubuntu-latest
@@ -202,7 +186,7 @@ jobs:
         run: |
           cosign attest \
             --yes \
-            --type spdx \
+            --type cyclonedx \
             --predicate bom.json \
             ${{ steps.image_tag.outputs.tag }}
         env:
