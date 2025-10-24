@@ -63,8 +63,9 @@ jobs:
         id: build
         uses: docker/build-push-action@v6
         with:
-          context: .
-          file: app/Dockerfile
+          # This is the fix: Set the context to the 'app' directory
+          context: ./app
+          file: ./app/Dockerfile
           push: false
           load: true
           tags: ${{ steps.meta.outputs.tags }}
@@ -215,3 +216,4 @@ jobs:
       - name: Push signed image to registry
         run: |
           docker push ${{ steps.image_tag.outputs.tag }}
+
