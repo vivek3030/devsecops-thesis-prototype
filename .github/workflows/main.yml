@@ -72,7 +72,7 @@ jobs:
       # --- STAGE 2: ANALYZE (SBOM) ---
       # Runs Syft to generate the SBOM from the image we just built
       - name: Generate SBOM (Syft)
-        uses: anchore/syft-action@v0.12.0
+        uses: anchore/syft-action@v0
         with:
           image: ${{ steps.meta.outputs.tags }}
           format: cyclone-dx-json # Use CycloneDX format
@@ -81,7 +81,7 @@ jobs:
       # --- STAGE 2: ANALYZE (Scan) ---
       # Runs Grype to scan the SBOM for vulnerabilities
       - name: Scan for Vulnerabilities (Grype)
-        uses: anchore/grype-action@v0.34.0
+        uses: anchore/grype-action@v3
         with:
           sbom: bom.json # Tell Grype to scan the SBOM file directly
           output: vulnerabilities.json # Save the report as JSON
@@ -219,3 +219,5 @@ jobs:
       - name: Push signed image to registry
         run: |
           docker push ${{ steps.image_tag.outputs.tag }}
+
+
