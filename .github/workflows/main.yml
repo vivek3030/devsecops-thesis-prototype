@@ -118,20 +118,9 @@ jobs:
 
       - name: Install Open Policy Agent (OPA)
         run: |
-          # THE FIX IS HERE: Use the stable GitHub release URL
-          curl -L -o opa https://github.com/open-policy-agent/opa/releases/download/v0.71.0/opa_linux_amd64
+          # THE FIX IS HERE: Use the "latest" release URL
+          curl -L -o opa https://github.com/open-policy-agent/opa/releases/latest/download/opa_linux_amd64
           chmod +x ./opa
-
-      # --- NEW DEBUG STEP ---
-      # This step will show us what was *actually* downloaded.
-      - name: Verify OPA Download
-        run: |
-          echo "Verifying the downloaded 'opa' file:"
-          file ./opa
-          echo "--- First line of ./opa file: ---"
-          head -n 1 ./opa
-          echo "---------------------------------"
-      # --- END NEW DEBUG STEP ---
 
       - name: Create OPA Input JSON
         run: |
@@ -216,3 +205,6 @@ jobs:
       - name: Push signed image to registry
         run: |
           docker push ${{ steps.image_tag.outputs.tag }}
+
+
+
