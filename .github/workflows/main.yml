@@ -29,9 +29,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Debug Repository Contents
-        run: ls -laR
-
       - name: Verify Go Module Files
         run: |
           if [[ ! -f app/go.mod || ! -f app/go.sum ]]; then
@@ -63,7 +60,6 @@ jobs:
         id: build
         uses: docker/build-push-action@v6
         with:
-          # This is the fix: Set the context to the 'app' directory
           context: ./app
           file: ./app/Dockerfile
           push: false
@@ -75,17 +71,16 @@ jobs:
         uses: anchore/sbom-action@v0
         with:
           image: ${{ steps.meta.outputs.tags }}
-          format: cyclonedx-json # <-- THIS IS THE FIX
+          format: cyclonedx-json
           output-file: bom.json
 
       - name: Scan for Vulnerabilities (Grype)
         uses: anchore/scan-action@v6
         with:
-          sbom: bom.json # FIX: 'sbom-file:' changed to 'sbom:'
-          output-file: vulnerabilities.json # FIX: 'output:' changed to 'output-file:'
+          sbom: bom.json
+          output-file: vulnerabilities.json
           output-format: json
-          # 'skip-sbom-generation' is not a valid input and is not needed.
-          fail-build: false # This will now be correctly processed.
+          fail-build: false
 
       - name: Save Docker image to tarball
         run: docker save ${{ steps.meta.outputs.tags }} -o /tmp/docker-image.tar
@@ -123,8 +118,20 @@ jobs:
 
       - name: Install Open Policy Agent (OPA)
         run: |
+          # THE FIX IS HERE: Use the stable GitHub release URL
           curl -L -o opa https://github.com/open-policy-agent/opa/releases/download/v0.71.0/opa_linux_amd64
           chmod +x ./opa
+
+      # --- NEW DEBUG STEP ---
+      # This step will show us what was *actually* downloaded.
+      - name: Verify OPA Download
+        run: |
+          echo "Verifying the downloaded 'opa' file:"
+          file ./opa
+          echo "--- First line of ./opa file: ---"
+          head -n 1 ./opa
+          echo "---------------------------------"
+      # --- END NEW DEBUG STEP ---
 
       - name: Create OPA Input JSON
         run: |
@@ -135,16 +142,10 @@ jobs:
 
       - name: Run OPA Policy Gate
         run: |
-          # This command is the core security gate.
-          # --fail: Exits with 1 (fails the build) if 'data.main.allow' is false.
-          # --input: The JSON file with our SBOM and vulnerability data.
-          # --data: Our policy/policy.rego file.
           ./opa eval --fail \
             --input input.json \
             --data policy/policy.rego \
             "data.main.allow"
-          
-          # If the command above succeeds (doesn't exit 1), it means the policy passed.
           echo "OPA Policy PASSED"
 
   sign-and-publish:
@@ -180,7 +181,7 @@ jobs:
       - name: Install Sigstore/cosign
         uses: sigstore/cosign-installer@v3
 
-      - name: Sign the image with Sigstore
+      - name: Sign the. image with Sigstore
         run: |
           cosign sign \
             --yes \
@@ -215,5 +216,3 @@ jobs:
       - name: Push signed image to registry
         run: |
           docker push ${{ steps.image_tag.outputs.tag }}
-
-
