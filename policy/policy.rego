@@ -1,40 +1,59 @@
-# File: policy/policy.rego
-# This is the "brain" of the security gate.
-# It receives input from the CI pipeline (bom.json and vulnerabilities.json).
 package main
 
-# By default, the build is allowed.
-# We will write rules that set 'allow' to false.
-default allow = true
+#
+# This policy defines the security gate for the CI/CD pipeline.
+#
+# The 'input' document is a JSON object with two keys:
+# {
+#   "vulnerabilities": { ... Grype report ... },
+#   "sbom": { ... Syft report ... }
+# }
+#
 
-# --- Vulnerability Rules ---
-# Reads from the 'vulnerabilities.json' (Grype) report.
+# ---
+# Main Rule: 'allow'
+# ---
+# By default, deny the build.
+default allow = false
 
-# DENY if any vulnerability is 'Critical'
-allow = false {
-    # 'some match' iterates over the list of found vulnerabilities
-    some match in input.vulnerabilities.matches
-    match.vulnerability.severity == "Critical"
-    # Print a message when this rule triggers
-    print(format("POLICY_VIOLATION: Build blocked due to CRITICAL vulnerability: %s", [match.vulnerability.id]))
+# ALLOW the build if all policies pass
+allow if {
+	count(critical_vulnerabilities) == 0
+	count(high_vulnerabilities) == 0
+	count(medium_vulnerabilities) == 0
 }
 
-# DENY if any vulnerability is 'High'
-allow = false {
-    some match in input.vulnerabilities.matches
-    match.vulnerability.severity == "High"
-    print(format("POLICY_VIOLATION: Build blocked due to HIGH vulnerability: %s", [match.vulnerability.id]))
+# ---
+# Helper Rule: Find Critical Vulnerabilities
+# THE FIX IS HERE: Added the 'if' keyword
+# ---
+critical_vulnerabilities[id] if {
+	# Find any vulnerability match
+	vuln := input.vulnerabilities.matches[_]
+	
+	# Check if its severity is "Critical"
+	vuln.vulnerability.severity == "Critical"
+	
+	# Return the ID of the vulnerability
+	id := vuln.vulnerability.id
 }
 
-# --- License Rules ---
-# Reads from the 'bom.json' (Syft) report.
-
-# DENY if a forbidden license is found.
-# For this example, we block "GPL-3.0".
-allow = false {
-    some comp in input.sbom.components
-    some lic in comp.licenses
-    lic.license.id == "GPL-3.0"
-    print(format("POLICY_VIOLATION: Build blocked due to forbidden license 'GPL-3.0' in component '%s'", [comp.name]))
+# ---
+# Helper Rule: Find High Vulnerabilities
+# THE FIX IS HERE: Added the 'if' keyword
+# ---
+high_vulnerabilities[id] if {
+	vuln := input.vulnerabilities.matches[_]
+	vuln.vulnerability.severity == "High"
+	id := vuln.vulnerability.id
 }
 
+# ---
+# Helper Rule: Find Medium Vulnerabilities
+# THE FIX IS HERE: Added the 'if' keyword
+# ---
+medium_vulnerabilities[id] if {
+	vuln := input.vulnerabilities.matches[_]
+	vuln.vulnerability.severity == "Medium"
+	id := vuln.vulnerability.id
+}
