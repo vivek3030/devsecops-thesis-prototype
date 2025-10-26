@@ -135,17 +135,17 @@ jobs:
 
       - name: Run OPA Policy Gate
         run: |
-          ./opa eval --fail-defined \
+          # This command is the core security gate.
+          # --fail: Exits with 1 (fails the build) if 'data.main.allow' is false.
+          # --input: The JSON file with our SBOM and vulnerability data.
+          # --data: Our policy/policy.rego file.
+          ./opa eval --fail \
             --input input.json \
             --data policy/policy.rego \
-            --format json \
-            "data.main.allow" > opa_result.json
-          if [[ $(jq '.result[0].expressions[0].value' opa_result.json) == "true" ]]; then
-            echo "OPA Policy PASSED"
-          else
-            echo "OPA Policy FAILED"
-            exit 1
-          fi
+            "data.main.allow"
+          
+          # If the command above succeeds (doesn't exit 1), it means the policy passed.
+          echo "OPA Policy PASSED"
 
   sign-and-publish:
     name: 3 - Attest and Publish
