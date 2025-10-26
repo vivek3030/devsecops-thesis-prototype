@@ -74,19 +74,18 @@ jobs:
       - name: Generate SBOM (Syft)
         uses: anchore/sbom-action@v0
         with:
-          target: image
-          image: ${{ steps.meta.outputs.tags }}
+          image: ${{ steps.meta.outputs.tags }} # FIX: 'target:' changed to 'image:'
           format: cyclonedx
-          file: bom.json
+          output-file: bom.json # FIX: 'file:' changed to 'output-file:'
 
       - name: Scan for Vulnerabilities (Grype)
         uses: anchore/scan-action@v6
         with:
-          sbom-file: bom.json
-          output: vulnerabilities.json
+          sbom: bom.json # FIX: 'sbom-file:' changed to 'sbom:'
+          output-file: vulnerabilities.json # FIX: 'output:' changed to 'output-file:'
           output-format: json
-          skip-sbom-generation: true
-          fail-build: false
+          # 'skip-sbom-generation' is not a valid input and is not needed.
+          fail-build: false # This will now be correctly processed.
 
       - name: Save Docker image to tarball
         run: docker save ${{ steps.meta.outputs.tags }} -o /tmp/docker-image.tar
@@ -216,4 +215,5 @@ jobs:
       - name: Push signed image to registry
         run: |
           docker push ${{ steps.image_tag.outputs.tag }}
+
 
