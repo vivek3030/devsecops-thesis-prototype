@@ -123,7 +123,7 @@ jobs:
 
       - name: Install Open Policy Agent (OPA)
         run: |
-          curl -L -o opa https://openpolicyagent.org/downloads/v0.71.0/opa_linux_amd64
+          curl -L -o opa https://github.com/open-policy-agent/opa/releases/download/v0.71.0/opa_linux_amd64
           chmod +x ./opa
 
       - name: Create OPA Input JSON
