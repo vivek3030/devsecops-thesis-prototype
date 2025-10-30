@@ -223,6 +223,7 @@ jobs:
         run: |
           cosign verify \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/.*" \
             ${{ steps.image_tag.outputs.tag }}
         env:
           COSIGN_EXPERIMENTAL: 1
