@@ -189,7 +189,13 @@ jobs:
       - name: Install Sigstore/cosign
         uses: sigstore/cosign-installer@v3
 
-      - name: Sign the. image with Sigstore
+      # --- STEP 1 (MOVED): Push the unsigned image first ---
+      - name: Push image to registry
+        run: |
+          docker push ${{ steps.image_tag.outputs.tag }}
+
+      # --- STEP 2: Sign the image (now that it's in the registry) ---
+      - name: Sign the image with Sigstore
         run: |
           cosign sign \
             --yes \
@@ -221,6 +227,7 @@ jobs:
         env:
           COSIGN_EXPERIMENTAL: 1
 
-      - name: Push signed image to registry
-        run: |
-          docker push ${{ steps.image_tag.outputs.tag }}
+      # --- This step is no longer needed, as we pushed first ---
+      # - name: Push signed image to registry
+      #   run: |
+      #     docker push ${{ steps.image_tag.outputs.tag }}
