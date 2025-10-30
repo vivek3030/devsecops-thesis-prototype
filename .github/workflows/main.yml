@@ -104,7 +104,13 @@ jobs:
   policy-gate:
     name: 2 - Enforce Security Policy
     runs-on: ubuntu-latest
-    needs: [build]
+    needs: [build] # This job runs only after 'build' succeeds
+
+    # --- ADD THIS OUTPUTS BLOCK ---
+    # We pass the image tag through this job so the next job can access it
+    outputs:
+      image_tag: ${{ needs.build.outputs.image_tag }}
+    # --- END OF ADDITION ---
 
     steps:
       - name: Checkout repository (for OPA policy file)
@@ -121,6 +127,17 @@ jobs:
           # THE FIX IS HERE: Use the "latest" release URL
           curl -L -o opa https://github.com/open-policy-agent/opa/releases/latest/download/opa_linux_amd64
           chmod +x ./opa
+
+      # --- NEW DEBUG STEP ---
+      # This step will show us what was *actually* downloaded.
+      - name: Verify OPA Download
+        run: |
+          echo "Verifying the downloaded 'opa' file:"
+          file ./opa
+          echo "--- First line of ./opa file: ---"
+          head -n 1 ./opa
+          echo "---------------------------------"
+      # --- END NEW DEBUG STEP ---
 
       - name: Create OPA Input JSON
         run: |
@@ -140,7 +157,7 @@ jobs:
   sign-and-publish:
     name: 3 - Attest and Publish
     runs-on: ubuntu-latest
-    needs: [policy-gate]
+    needs: [policy-gate] # Only runs if the policy gate PASSED
     permissions:
       contents: read
       packages: write
@@ -158,7 +175,9 @@ jobs:
 
       - name: Get Image Tag
         id: image_tag
-        run: echo "tag=${{ needs.build.outputs.image_tag }}" >> $GITHUB_OUTPUT
+        # --- MODIFY THIS LINE ---
+        # Read the output from 'policy-gate' instead of 'build'
+        run: echo "tag=${{ needs.policy-gate.outputs.image_tag }}" >> $GITHUB_OUTPUT
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -205,6 +224,3 @@ jobs:
       - name: Push signed image to registry
         run: |
           docker push ${{ steps.image_tag.outputs.tag }}
-
-
-
