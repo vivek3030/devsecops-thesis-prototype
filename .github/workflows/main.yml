@@ -193,7 +193,7 @@ jobs:
       - name: Attach SBOM Attestation
         env:
           COSIGN_EXPERIMENTAL: 1
-        run: cosign attest --type cyclonedx --predicate ./bom.json ${{ steps.digest.outputs.digest }}
+        run: cosign attest --yes --type cyclonedx --predicate ./bom.json ${{ steps.digest.outputs.digest }}
 
       - name: Verify Image Signature
         env:
