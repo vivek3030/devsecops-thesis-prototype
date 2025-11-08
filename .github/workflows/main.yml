@@ -139,8 +139,8 @@ jobs:
         id: opa_eval
         run: |
           # Run OPA and capture the JSON output
-          # Use -d to load the policy file
-          RESULT=$(opa eval -i input.json -d ./policy/policy.rego 'data.main.allow' --format=json)
+          # Use -d to load the policy *directory*
+          RESULT=$(opa eval -i input.json -d ./policy 'data.main.allow' --format=json)
           echo "OPA raw result: $RESULT"
           
           # Parse the JSON for a 'true' result
@@ -149,7 +149,7 @@ jobs:
           if [ "$PASSED" != "true" ]; then
             echo "OPA Policy FAILED!"
             # Optionally, show deny reasons if we configured them
-            opa eval -i input.json -d ./policy/policy.rego 'data.main.deny'
+            opa eval -i input.json -d ./policy 'data.main.deny'
             exit 1
           fi
           echo "OPA Policy PASSED"
