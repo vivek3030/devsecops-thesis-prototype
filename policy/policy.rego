@@ -3,7 +3,8 @@ package main
 # Default: deny builds
 default allow = false
 
-# Allow if there are no high/critical vulnerabilities
+# Allow only when there are no critical or high vulnerabilities.
+# You may change thresholds if you want to allow a small number of medium issues.
 allow {
   count(critical_vulnerabilities) == 0
   count(high_vulnerabilities) == 0
@@ -27,7 +28,16 @@ high_vulnerabilities[id] {
   id := vuln.vulnerability.id
 }
 
-# Helpful deny message rule (for human readable output)
+# Collect medium vulnerabilities (optional)
+medium_vulnerabilities[id] {
+  some i
+  vuln := input.vulnerabilities.matches[i]
+  severity := lower(vuln.vulnerability.severity)
+  severity == "medium"
+  id := vuln.vulnerability.id
+}
+
+# Human-readable deny messages (helpful for logs/CI output)
 deny[msg] {
   not allow
   reasons := [r | critical_vulnerabilities[r]]

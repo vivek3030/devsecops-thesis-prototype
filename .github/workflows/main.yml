@@ -1,47 +1,45 @@
-# This is the main artifact of the thesis (Chapter 5)
-# It implements the 4-stage framework: Build, Analyze, Enforce, Attest
-# This v6 version is refactored based on expert review to be robust and reproducible.
-
 name: DevSecOps Secure Supply Chain
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
   workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
-  # Use github.repository (e.g., vivek3030/devsecops-thesis-prototype) as the base image name
-  IMAGE_NAME: ${{ github.repository }}
+  IMAGE_REPO: ${{ github.repository }}
 
 jobs:
-  #========================================
-  # JOB 1: BUILD & ANALYZE
-  #========================================
   build:
     name: 1 - Build and Analyze
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-    
+
     outputs:
-      image_tag: ${{ steps.vars.outputs.image }} # Pass the canonical tag to downstream jobs
+      image_tag: ${{ steps.set-image.outputs.image }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # --- FIX #1: Canonical Image Tag ---
-      # Set a single, deterministic image tag based on the commit SHA
-      # This fixes the ambiguity of using docker/metadata-action
-      - name: Set canonical image tag
-        id: vars
+      - name: Verify Go Module Files
         run: |
-          IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
-          echo "image=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+          if [[ ! -f app/go.mod || ! -f app/go.sum ]]; then
+            echo "Error: app/go.mod or app/go.sum missing. Please commit these files."
+            exit 1
+          else
+            echo "app/go.mod and app/go.sum found."
+          fi
+
+      - name: Set image variable (canonical tag)
+        id: set-image
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}:${{ github.sha }}"
+          echo "image=${IMAGE}" >> $GITHUB_OUTPUT
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -53,37 +51,54 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # --- STAGE 1: BUILD ---
-      - name: Build Docker image
+      - name: Build Docker image (load locally)
         id: build
         uses: docker/build-push-action@v6
         with:
-          context: ./app # Correct build context
+          context: ./app
           file: ./app/Dockerfile
-          push: false # Do not push yet
-          load: true  # Load into local daemon
-          tags: ${{ steps.vars.outputs.image }} # Use the canonical tag
+          push: false
+          load: true
+          tags: ${{ steps.set-image.outputs.image }}
 
-      # --- STAGE 2: ANALYZE (SBOM) ---
-      - name: Generate SBOM (Syft)
+      - name: Record security-start timestamp
+        id: ts_start
+        run: echo "START=$(date +%s)" >> $GITHUB_OUTPUT
+
+      - name: Generate SBOM (Syft via Anchore Action)
         uses: anchore/sbom-action@v0
         with:
-          image: ${{ steps.vars.outputs.image }}
-          format: cyclonedx-json # Use the correct JSON format
+          image: ${{ steps.set-image.outputs.image }}
+          format: cyclonedx-json
           output-file: bom.json
 
-      # --- STAGE 2: ANALYZE (Scan) ---
-      - name: Scan for Vulnerabilities (Grype)
+      - name: Scan for Vulnerabilities (Grype via Anchore Action)
         uses: anchore/scan-action@v6
         with:
-          sbom: bom.json # Scan the SBOM
+          sbom: bom.json
           output-file: vulnerabilities.json
           output-format: json
-          fail-build: false # We let OPA decide
+          fail-build: false
 
-      # --- Save artifacts for next jobs ---
+      - name: Record security-end timestamp
+        id: ts_end
+        run: echo "END=$(date +%s)" >> $GITHUB_OUTPUT
+
+      - name: Calculate and upload durations
+        run: |
+          START=${{ steps.ts_start.outputs.START }}
+          END=${{ steps.ts_end.outputs.END }}
+          DURATION=$((END-START))
+          echo "start=${START},end=${END},security_duration_seconds=${DURATION}" > duration.properties
+      - name: Upload duration artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: duration
+          path: duration.properties
+          retention-days: 7
+
       - name: Save Docker image to tarball
-        run: docker save ${{ steps.vars.outputs.image }} -o /tmp/docker-image.tar
+        run: docker save ${{ steps.set-image.outputs.image }} -o /tmp/docker-image.tar
 
       - name: Upload Artifacts (SBOM & Scan)
         uses: actions/upload-artifact@v4
@@ -92,25 +107,24 @@ jobs:
           path: |
             bom.json
             vulnerabilities.json
-      
+          retention-days: 7
+
       - name: Upload Docker Image Artifact
         uses: actions/upload-artifact@v4
         with:
           name: docker-image
           path: /tmp/docker-image.tar
+          retention-days: 7
 
-  #========================================
-  # JOB 2: ENFORCE (The Security Gate)
-  #========================================
   policy-gate:
     name: 2 - Enforce Security Policy
     runs-on: ubuntu-latest
     needs: [build]
+    outputs:
+      image_tag: ${{ needs.build.outputs.image_tag }}
 
     steps:
-      # --- FIX: ADD THIS STEP ---
-      # We must check out the repo to get the policy/policy.rego file
-      - name: Checkout repository
+      - name: Checkout repository (for OPA policy files)
         uses: actions/checkout@v4
 
       - name: Download security reports
@@ -119,7 +133,6 @@ jobs:
           name: security-reports
           path: .
 
-      # --- FIX #3: Robust OPA Install ---
       - name: Install Open Policy Agent (OPA)
         run: |
           curl -L -o /tmp/opa https://github.com/open-policy-agent/opa/releases/latest/download/opa_linux_amd64
@@ -131,51 +144,53 @@ jobs:
         run: |
           jq -n --slurpfile grype vulnerabilities.json --slurpfile syft bom.json \
             '{"vulnerabilities": $grype[0], "sbom": $syft[0]}' > input.json
-          echo "Generated input.json for OPA:"
-          cat input.json | jq .
+          echo "Input prepared for OPA:"
+          jq . input.json
 
-      # --- FIX #3: Robust OPA Evaluation ---
-      - name: Run OPA Policy Gate
+      - name: Run OPA Policy Gate (deterministic)
         id: opa_eval
         run: |
-          # Run OPA and capture the JSON output
-          # Use -d to load the specific policy *file*
-          RESULT=$(opa eval -i input.json -d ./policy/policy.rego 'data.main.allow' --format=json)
+          # Evaluate the policy; output JSON to parse
+          RESULT=$(opa eval -i input.json -d ./policy 'data.main.allow' --format=json 2>&1) || true
           echo "OPA raw result: $RESULT"
-          
-          # Parse the JSON for a 'true' result
+          # Try to extract boolean result
           PASSED=$(echo "$RESULT" | jq -r '.result[0].expressions[0].value // "false"')
-          
+          echo "passed=${PASSED}" >> $GITHUB_OUTPUT
           if [ "$PASSED" != "true" ]; then
-            echo "OPA Policy FAILED!"
-            # Optionally, show deny reasons if we configured them
-            opa eval -i input.json -d ./policy/policy.rego 'data.main.deny'
+            echo "OPA policy evaluation did NOT pass. Printing allow expression result and deny messages..."
+            # Try to print deny messages (if policy provides them)
+            DENY=$(opa eval -i input.json -d ./policy 'data.main.deny' --format=json 2>/dev/null || true)
+            echo "DENY output: $DENY"
             exit 1
           fi
           echo "OPA Policy PASSED"
 
-  #========================================
-  # JOB 3: ATTEST & PUBLISH
-  #========================================
   sign-and-publish:
     name: 3 - Attest and Publish
     runs-on: ubuntu-latest
-    needs: [build, policy-gate] # Depends on both
+    needs: [policy-gate]
     permissions:
       contents: read
       packages: write
-      id-token: write # Required for keyless signing
+      id-token: write
 
     steps:
-      - name: Download Artifacts
+      - name: Checkout repo (for attestations)
+        uses: actions/checkout@v4
+
+      - name: Download Docker Image Artifact
         uses: actions/download-artifact@v4
         with:
           name: docker-image
           path: /tmp
-      - uses: actions/download-artifact@v4
-        with:
-          name: security-reports
-          path: .
+
+      - name: Load Docker image
+        run: docker load -i /tmp/docker-image.tar
+
+      - name: Set IMAGE variable from upstream
+        run: |
+          echo "IMAGE=${{ needs.policy-gate.outputs.image_tag }}" >> $GITHUB_OUTPUT
+        id: setimage
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -184,33 +199,37 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Retag loaded image to canonical tag (if needed) & Push
+        run: |
+          # Attempt to find the loaded image ID (first image), then tag to canonical and push
+          LOADED_IMAGE=$(docker images --format "{{.Repository}}:{{.Tag}}" | head -n 1 || true)
+          echo "Loaded image (first): $LOADED_IMAGE"
+          docker tag "$LOADED_IMAGE" "${{ needs.policy-gate.outputs.image_tag }}" || true
+          docker push "${{ needs.policy-gate.outputs.image_tag }}"
+
       - name: Install Sigstore/cosign
         uses: sigstore/cosign-installer@v3
 
-      # --- FIX #6: Robust Load/Tag/Push ---
-      - name: Load, Tag, and Push image to registry
-        run: |
-          docker load -i /tmp/docker-image.tar
-          # This re-tags the loaded image just in case the tag was lost, then pushes
-          docker push ${{ needs.build.outputs.image_tag }}
-
-      # --- FIX #2: Correct Cosign Keyless Signing ---
       - name: Sign the image with Cosign (keyless)
-        env:
-          COSIGN_EXPERIMENTAL: "1" # Still good practice
-        run: |
-          cosign sign --keyless ${{ needs.build.outputs.image_tag }}
-
-      - name: Attach SBOM Attestation (keyless)
         env:
           COSIGN_EXPERIMENTAL: "1"
         run: |
-          cosign attest --type cyclonedx --predicate ./bom.json --keyless ${{ needs.build.outputs.image_tag }}
+          cosign sign --keyless "${{ needs.policy-gate.outputs.image_tag }}"
+
+      - name: Download SBOM report
+        uses: actions/download-artifact@v4
+        with:
+          name: security-reports
+          path: .
+
+      - name: Attach SBOM Attestation (cosign attest, keyless)
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          cosign attest --type cyclonedx --predicate ./bom.json --keyless "${{ needs.policy-gate.outputs.image_tag }}"
 
       - name: Verify Image Signature (keyless)
         env:
           COSIGN_EXPERIMENTAL: "1"
         run: |
-          # --keyless verification automatically checks the GitHub OIDC issuer
-          # and identity against the repo. This is much cleaner.
-          cosign verify --keyless ${{ needs.build.outputs.image_tag }}
+          cosign verify --keyless "${{ needs.policy-gate.outputs.image_tag }}"
