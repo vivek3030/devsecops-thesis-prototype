@@ -108,6 +108,11 @@ jobs:
     needs: [build]
 
     steps:
+      # --- FIX: ADD THIS STEP ---
+      # We must check out the repo to get the policy/policy.rego file
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Download security reports
         uses: actions/download-artifact@v4
         with:
