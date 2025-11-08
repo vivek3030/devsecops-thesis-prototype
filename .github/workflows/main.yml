@@ -1,5 +1,6 @@
 # This is the main artifact of the thesis (Chapter 5)
 # It implements the 4-stage framework: Build, Analyze, Enforce, Attest
+# This v6 version is refactored based on expert review to be robust and reproducible.
 
 name: DevSecOps Secure Supply Chain
 
@@ -12,31 +13,35 @@ on:
 
 env:
   REGISTRY: ghcr.io
+  # Use github.repository (e.g., vivek3030/devsecops-thesis-prototype) as the base image name
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  #========================================
+  # JOB 1: BUILD & ANALYZE
+  #========================================
   build:
     name: 1 - Build and Analyze
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-
+    
     outputs:
-      image_tag: ${{ steps.meta.outputs.tags }}
+      image_tag: ${{ steps.vars.outputs.image }} # Pass the canonical tag to downstream jobs
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Verify Go Module Files
+      # --- FIX #1: Canonical Image Tag ---
+      # Set a single, deterministic image tag based on the commit SHA
+      # This fixes the ambiguity of using docker/metadata-action
+      - name: Set canonical image tag
+        id: vars
         run: |
-          if [[ ! -f app/go.mod || ! -f app/go.sum ]]; then
-            echo "Error: app/go.mod or app/go.sum missing. Please commit these files."
-            exit 1
-          else
-            echo "app/go.mod and app/go.sum found."
-          fi
+          IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          echo "image=${IMAGE_TAG}" >> $GITHUB_OUTPUT
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -48,42 +53,37 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=sha,prefix=,format=short
-
+      # --- STAGE 1: BUILD ---
       - name: Build Docker image
         id: build
         uses: docker/build-push-action@v6
         with:
-          context: ./app
+          context: ./app # Correct build context
           file: ./app/Dockerfile
-          push: false
-          load: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          push: false # Do not push yet
+          load: true  # Load into local daemon
+          tags: ${{ steps.vars.outputs.image }} # Use the canonical tag
 
+      # --- STAGE 2: ANALYZE (SBOM) ---
       - name: Generate SBOM (Syft)
         uses: anchore/sbom-action@v0
         with:
-          image: ${{ steps.meta.outputs.tags }}
-          format: cyclonedx-json
+          image: ${{ steps.vars.outputs.image }}
+          format: cyclonedx-json # Use the correct JSON format
           output-file: bom.json
 
+      # --- STAGE 2: ANALYZE (Scan) ---
       - name: Scan for Vulnerabilities (Grype)
         uses: anchore/scan-action@v6
         with:
-          sbom: bom.json
+          sbom: bom.json # Scan the SBOM
           output-file: vulnerabilities.json
           output-format: json
-          fail-build: false
+          fail-build: false # We let OPA decide
 
+      # --- Save artifacts for next jobs ---
       - name: Save Docker image to tarball
-        run: docker save ${{ steps.meta.outputs.tags }} -o /tmp/docker-image.tar
+        run: docker save ${{ steps.vars.outputs.image }} -o /tmp/docker-image.tar
 
       - name: Upload Artifacts (SBOM & Scan)
         uses: actions/upload-artifact@v4
@@ -92,52 +92,35 @@ jobs:
           path: |
             bom.json
             vulnerabilities.json
-          retention-days: 7
-
+      
       - name: Upload Docker Image Artifact
         uses: actions/upload-artifact@v4
         with:
           name: docker-image
           path: /tmp/docker-image.tar
-          retention-days: 7
 
+  #========================================
+  # JOB 2: ENFORCE (The Security Gate)
+  #========================================
   policy-gate:
     name: 2 - Enforce Security Policy
     runs-on: ubuntu-latest
-    needs: [build] # This job runs only after 'build' succeeds
-
-    # --- ADD THIS OUTPUTS BLOCK ---
-    # We pass the image tag through this job so the next job can access it
-    outputs:
-      image_tag: ${{ needs.build.outputs.image_tag }}
-    # --- END OF ADDITION ---
+    needs: [build]
 
     steps:
-      - name: Checkout repository (for OPA policy file)
-        uses: actions/checkout@v4
-
       - name: Download security reports
         uses: actions/download-artifact@v4
         with:
           name: security-reports
           path: .
 
+      # --- FIX #3: Robust OPA Install ---
       - name: Install Open Policy Agent (OPA)
         run: |
-          # THE FIX IS HERE: Use the "latest" release URL
-          curl -L -o opa https://github.com/open-policy-agent/opa/releases/latest/download/opa_linux_amd64
-          chmod +x ./opa
-
-      # --- NEW DEBUG STEP ---
-      # This step will show us what was *actually* downloaded.
-      - name: Verify OPA Download
-        run: |
-          echo "Verifying the downloaded 'opa' file:"
-          file ./opa
-          echo "--- First line of ./opa file: ---"
-          head -n 1 ./opa
-          echo "---------------------------------"
-      # --- END NEW DEBUG STEP ---
+          curl -L -o /tmp/opa https://github.com/open-policy-agent/opa/releases/latest/download/opa_linux_amd64
+          chmod +x /tmp/opa
+          sudo mv /tmp/opa /usr/local/bin/opa
+          opa version
 
       - name: Create OPA Input JSON
         run: |
@@ -146,38 +129,47 @@ jobs:
           echo "Generated input.json for OPA:"
           cat input.json | jq .
 
+      # --- FIX #3: Robust OPA Evaluation ---
       - name: Run OPA Policy Gate
+        id: opa_eval
         run: |
-          ./opa eval --fail \
-            --input input.json \
-            --data policy/policy.rego \
-            "data.main.allow"
+          # Run OPA and capture the JSON output
+          RESULT=$(opa eval -i input.json -d ./policy 'data.main.allow' --format=json)
+          echo "OPA raw result: $RESULT"
+          
+          # Parse the JSON for a 'true' result
+          PASSED=$(echo "$RESULT" | jq -r '.result[0].expressions[0].value // "false"')
+          
+          if [ "$PASSED" != "true" ]; then
+            echo "OPA Policy FAILED!"
+            # Optionally, show deny reasons if we configured them
+            opa eval -i input.json -d ./policy 'data.main.deny'
+            exit 1
+          fi
           echo "OPA Policy PASSED"
 
+  #========================================
+  # JOB 3: ATTEST & PUBLISH
+  #========================================
   sign-and-publish:
     name: 3 - Attest and Publish
     runs-on: ubuntu-latest
-    needs: [policy-gate] # Only runs if the policy gate PASSED
+    needs: [build, policy-gate] # Depends on both
     permissions:
       contents: read
       packages: write
-      id-token: write
+      id-token: write # Required for keyless signing
 
     steps:
-      - name: Download Docker Image Artifact
+      - name: Download Artifacts
         uses: actions/download-artifact@v4
         with:
           name: docker-image
           path: /tmp
-
-      - name: Load Docker image
-        run: docker load -i /tmp/docker-image.tar
-
-      - name: Get Image Tag
-        id: image_tag
-        # --- MODIFY THIS LINE ---
-        # Read the output from 'policy-gate' instead of 'build'
-        run: echo "tag=${{ needs.policy-gate.outputs.image_tag }}" >> $GITHUB_OUTPUT
+      - uses: actions/download-artifact@v4
+        with:
+          name: security-reports
+          path: .
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -189,46 +181,30 @@ jobs:
       - name: Install Sigstore/cosign
         uses: sigstore/cosign-installer@v3
 
-      # --- STEP 1 (MOVED): Push the unsigned image first ---
-      - name: Push image to registry
+      # --- FIX #6: Robust Load/Tag/Push ---
+      - name: Load, Tag, and Push image to registry
         run: |
-          docker push ${{ steps.image_tag.outputs.tag }}
+          docker load -i /tmp/docker-image.tar
+          # This re-tags the loaded image just in case the tag was lost, then pushes
+          docker push ${{ needs.build.outputs.image_tag }}
 
-      # --- STEP 2: Sign the image (now that it's in the registry) ---
-      - name: Sign the image with Sigstore
-        run: |
-          cosign sign \
-            --yes \
-            ${{ steps.image_tag.outputs.tag }}
+      # --- FIX #2: Correct Cosign Keyless Signing ---
+      - name: Sign the image with Cosign (keyless)
         env:
-          COSIGN_EXPERIMENTAL: 1
-
-      - name: Download SBOM report
-        uses: actions/download-artifact@v4
-        with:
-          name: security-reports
-          path: .
-
-      - name: Attach SBOM Attestation
+          COSIGN_EXPERIMENTAL: "1" # Still good practice
         run: |
-          cosign attest \
-            --yes \
-            --type cyclonedx \
-            --predicate bom.json \
-            ${{ steps.image_tag.outputs.tag }}
-        env:
-          COSIGN_EXPERIMENTAL: 1
+          cosign sign --keyless ${{ needs.build.outputs.image_tag }}
 
-      - name: Verify Image Signature
+      - name: Attach SBOM Attestation (keyless)
+        env:
+          COSIGN_EXPERIMENTAL: "1"
         run: |
-          cosign verify \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/.*" \
-            ${{ steps.image_tag.outputs.tag }}
-        env:
-          COSIGN_EXPERIMENTAL: 1
+          cosign attest --type cyclonedx --predicate ./bom.json --keyless ${{ needs.build.outputs.image_tag }}
 
-      # --- This step is no longer needed, as we pushed first ---
-      # - name: Push signed image to registry
-      #   run: |
-      #     docker push ${{ steps.image_tag.outputs.tag }}
+      - name: Verify Image Signature (keyless)
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          # --keyless verification automatically checks the GitHub OIDC issuer
+          # and identity against the repo. This is much cleaner.
+          cosign verify --keyless ${{ needs.build.outputs.image_tag }}

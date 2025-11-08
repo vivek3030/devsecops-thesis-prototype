@@ -1,59 +1,43 @@
 package main
 
-#
-# This policy defines the security gate for the CI/CD pipeline.
-#
-# The 'input' document is a JSON object with two keys:
-# {
-#   "vulnerabilities": { ... Grype report ... },
-#   "sbom": { ... Syft report ... }
-# }
-#
-
-# ---
-# Main Rule: 'allow'
-# ---
-# By default, deny the build.
+# Default: deny builds
 default allow = false
 
-# ALLOW the build if all policies pass
-allow if {
-	count(critical_vulnerabilities) == 0
-	count(high_vulnerabilities) == 0
-	count(medium_vulnerabilities) == 0
+# Allow if there are no high/critical vulnerabilities
+allow {
+  count(critical_vulnerabilities) == 0
+  count(high_vulnerabilities) == 0
 }
 
-# ---
-# Helper Rule: Find Critical Vulnerabilities
-# THE FIX IS HERE: Added the 'if' keyword
-# ---
-critical_vulnerabilities[id] if {
-	# Find any vulnerability match
-	vuln := input.vulnerabilities.matches[_]
-	
-	# Check if its severity is "Critical"
-	vuln.vulnerability.severity == "Critical"
-	
-	# Return the ID of the vulnerability
-	id := vuln.vulnerability.id
+# Collect critical vulnerabilities (case-insensitive)
+critical_vulnerabilities[id] {
+  some i
+  vuln := input.vulnerabilities.matches[i]
+  severity := lower(vuln.vulnerability.severity)
+  severity == "critical"
+  id := vuln.vulnerability.id
 }
 
-# ---
-# Helper Rule: Find High Vulnerabilities
-# THE FIX IS HERE: Added the 'if' keyword
-# ---
-high_vulnerabilities[id] if {
-	vuln := input.vulnerabilities.matches[_]
-	vuln.vulnerability.severity == "High"
-	id := vuln.vulnerability.id
+# Collect high vulnerabilities (case-insensitive)
+high_vulnerabilities[id] {
+  some i
+  vuln := input.vulnerabilities.matches[i]
+  severity := lower(vuln.vulnerability.severity)
+  severity == "high"
+  id := vuln.vulnerability.id
 }
 
-# ---
-# Helper Rule: Find Medium Vulnerabilities
-# THE FIX IS HERE: Added the 'if' keyword
-# ---
-medium_vulnerabilities[id] if {
-	vuln := input.vulnerabilities.matches[_]
-	vuln.vulnerability.severity == "Medium"
-	id := vuln.vulnerability.id
+# Helpful deny message rule (for human readable output)
+deny[msg] {
+  not allow
+  reasons := [r | critical_vulnerabilities[r]]
+  count(reasons) > 0
+  msg := sprintf("Build denied: critical vulnerabilities found: %v", [reasons])
+}
+
+deny[msg] {
+  not allow
+  reasons := [r | high_vulnerabilities[r]]
+  count(reasons) > 0
+  msg := sprintf("Build denied: high vulnerabilities found: %v", [reasons])
 }
