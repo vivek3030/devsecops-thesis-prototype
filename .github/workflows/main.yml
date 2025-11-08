@@ -29,13 +29,11 @@ jobs:
       - name: Verify Go Module Files
         run: |
           if [[ ! -f app/go.mod || ! -f app/go.sum ]]; then
-            echo "Error: app/go.mod or app/go.sum missing. Please commit these files."
+            echo "Error: app/go.mod or app/go.sum missing."
             exit 1
-          else
-            echo "app/go.mod and app/go.sum found."
           fi
 
-      - name: Set image variable (canonical tag)
+      - name: Set image tag
         id: set-image
         run: |
           IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}:${{ github.sha }}"
@@ -51,51 +49,30 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build Docker image (load locally)
+      - name: Build Docker image
         id: build
         uses: docker/build-push-action@v6
         with:
           context: ./app
           file: ./app/Dockerfile
-          push: false
           load: true
+          push: false
           tags: ${{ steps.set-image.outputs.image }}
 
-      - name: Record security-start timestamp
-        id: ts_start
-        run: echo "START=$(date +%s)" >> $GITHUB_OUTPUT
-
-      - name: Generate SBOM (Syft via Anchore Action)
+      - name: Generate SBOM (Syft)
         uses: anchore/sbom-action@v0
         with:
           image: ${{ steps.set-image.outputs.image }}
           format: cyclonedx-json
           output-file: bom.json
 
-      - name: Scan for Vulnerabilities (Grype via Anchore Action)
+      - name: Scan for Vulnerabilities (Grype)
         uses: anchore/scan-action@v6
         with:
           sbom: bom.json
           output-file: vulnerabilities.json
           output-format: json
           fail-build: false
-
-      - name: Record security-end timestamp
-        id: ts_end
-        run: echo "END=$(date +%s)" >> $GITHUB_OUTPUT
-
-      - name: Calculate and upload durations
-        run: |
-          START=${{ steps.ts_start.outputs.START }}
-          END=${{ steps.ts_end.outputs.END }}
-          DURATION=$((END-START))
-          echo "start=${START},end=${END},security_duration_seconds=${DURATION}" > duration.properties
-      - name: Upload duration artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: duration
-          path: duration.properties
-          retention-days: 7
 
       - name: Save Docker image to tarball
         run: docker save ${{ steps.set-image.outputs.image }} -o /tmp/docker-image.tar
@@ -124,7 +101,7 @@ jobs:
       image_tag: ${{ needs.build.outputs.image_tag }}
 
     steps:
-      - name: Checkout repository (for OPA policy files)
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Download security reports
@@ -133,34 +110,26 @@ jobs:
           name: security-reports
           path: .
 
-      - name: Install Open Policy Agent (OPA)
+      - name: Install OPA
         run: |
           curl -L -o /tmp/opa https://github.com/open-policy-agent/opa/releases/latest/download/opa_linux_amd64
           chmod +x /tmp/opa
           sudo mv /tmp/opa /usr/local/bin/opa
-          opa version
 
-      - name: Create OPA Input JSON
+      - name: Create OPA input JSON
         run: |
           jq -n --slurpfile grype vulnerabilities.json --slurpfile syft bom.json \
             '{"vulnerabilities": $grype[0], "sbom": $syft[0]}' > input.json
-          echo "Input prepared for OPA:"
-          jq . input.json
 
-      - name: Run OPA Policy Gate (deterministic)
+      - name: Run OPA Policy Gate
         id: opa_eval
         run: |
-          # Evaluate the policy; output JSON to parse
           RESULT=$(opa eval -i input.json -d ./policy 'data.main.allow' --format=json 2>&1) || true
-          echo "OPA raw result: $RESULT"
-          # Try to extract boolean result
           PASSED=$(echo "$RESULT" | jq -r '.result[0].expressions[0].value // "false"')
           echo "passed=${PASSED}" >> $GITHUB_OUTPUT
           if [ "$PASSED" != "true" ]; then
-            echo "OPA policy evaluation did NOT pass. Printing allow expression result and deny messages..."
-            # Try to print deny messages (if policy provides them)
             DENY=$(opa eval -i input.json -d ./policy 'data.main.deny' --format=json 2>/dev/null || true)
-            echo "DENY output: $DENY"
+            echo "OPA Policy DENY output: $DENY"
             exit 1
           fi
           echo "OPA Policy PASSED"
@@ -175,7 +144,10 @@ jobs:
       id-token: write
 
     steps:
-      - name: Download Docker Image Artifact
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Download Docker image artifact
         uses: actions/download-artifact@v4
         with:
           name: docker-image
@@ -184,9 +156,9 @@ jobs:
       - name: Load Docker image
         run: docker load -i /tmp/docker-image.tar
 
-      - name: Get Image Tag
-        id: image_tag
-        run: echo "tag=${{ needs.policy-gate.outputs.image_tag }}" >> $GITHUB_OUTPUT
+      - name: Set IMAGE variable from upstream
+        run: echo "IMAGE=${{ needs.policy-gate.outputs.image_tag }}" >> $GITHUB_OUTPUT
+        id: setimage
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -195,43 +167,49 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Push Docker image to registry
+        run: docker push ${{ steps.setimage.outputs.IMAGE }}
+
+      - name: Get image digest
+        id: digest
+        run: |
+          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' ${{ steps.setimage.outputs.IMAGE }})
+          echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
+
+      - name: Download SBOM artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: security-reports
+          path: .
+
       - name: Install Sigstore/cosign
         uses: sigstore/cosign-installer@v3
 
-      - name: Push image to registry
-        run: docker push ${{ steps.image_tag.outputs.tag }}
-
-      - name: Sign the image with Cosign (Keyless)
-        run: |
-          cosign sign \
-            --yes \
-            ${{ steps.image_tag.outputs.tag }}
+      - name: Sign image with Cosign (keyless)
         env:
           COSIGN_EXPERIMENTAL: 1
+        run: cosign sign --yes ${{ steps.digest.outputs.digest }}
 
       - name: Attach SBOM Attestation
-        run: |
-          cosign attest \
-            --yes \
-            --type cyclonedx \
-            --predicate bom.json \
-            ${{ steps.image_tag.outputs.tag }}
         env:
           COSIGN_EXPERIMENTAL: 1
+        run: cosign attest --type cyclonedx --predicate ./bom.json ${{ steps.digest.outputs.digest }}
 
       - name: Verify Image Signature
+        env:
+          COSIGN_EXPERIMENTAL: 1
         run: |
           cosign verify \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             --certificate-identity-regexp "^https://github.com/${{ github.repository }}/.*" \
-            ${{ steps.image_tag.outputs.tag }}
+            ${{ steps.digest.outputs.digest }}
+
+      - name: Verify SBOM Attestation
         env:
           COSIGN_EXPERIMENTAL: 1
-      - name: Verify Image Signature (keyless)
         run: |
-          cosign verify \
+          cosign verify-attestation \
+            --type cyclonedx \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             --certificate-identity-regexp "^https://github.com/${{ github.repository }}/.*" \
-            ${{ steps.image_tag.outputs.tag }}
-        env:
-          COSIGN_EXPERIMENTAL: 1
+            ${{ steps.digest.outputs.digest }}
