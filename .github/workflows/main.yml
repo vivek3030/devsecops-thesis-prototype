@@ -37,10 +37,107 @@ jobs:
 
       - name: Checkout repository
         uses: actions/checkout@v4
-# ... (all steps from 'Checkout repository' to 'Create OPA input JSON' are identical and correct) ...
-# ... (I am omitting them for brevity, NO CHANGES ARE NEEDED in the 'build' job or 'policy-gate' setup) ...
-# ...
-# ...
+
+      - name: Verify Go Module Files
+        run: |
+          if [[ ! -f app/go.mod || ! -f app/go.sum ]]; then
+            echo "Error: app/go.mod or app/go.sum missing."
+            exit 1
+          fi
+
+      - name: Set image tag
+        id: set-image
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}:${{ github.sha }}"
+          echo "image=${IMAGE}" >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Docker image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ./app
+          file: ./app/Dockerfile
+          load: true
+          push: false
+          tags: ${{ steps.set-image.outputs.image }}
+
+      - name: Generate SBOM (Syft)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ steps.set-image.outputs.image }}
+          format: cyclonedx-json
+          output-file: bom.json
+
+      - name: Extract SBOM Statistics
+        id: sbom-stats
+        run: |
+          COMPONENT_COUNT=$(jq '.components | length' bom.json)
+          echo "count=${COMPONENT_COUNT}" >> $GITHUB_OUTPUT
+          echo "📦 SBOM Components Found: ${COMPONENT_COUNT}"
+
+      - name: Scan for Vulnerabilities (Grype)
+        uses: anchore/scan-action@v6
+        with:
+          sbom: bom.json
+          output-file: vulnerabilities.json
+          output-format: json
+          fail-build: false
+
+      - name: Extract Vulnerability Statistics
+        id: vuln-stats
+        run: |
+          TOTAL=$(jq '.matches | length' vulnerabilities.json)
+          CRITICAL=$(jq '[.matches[] | select(.vulnerability.severity == "Critical")] | length' vulnerabilities.json)
+          HIGH=$(jq '[.matches[] | select(.vulnerability.severity == "High")] | length' vulnerabilities.json)
+          MEDIUM=$(jq '[.matches[] | select(.vulnerability.severity == "Medium")] | length' vulnerabilities.json)
+          LOW=$(jq '[.matches[] | select(.vulnerability.severity == "Low")] | length' vulnerabilities.json)
+          
+          echo "total=${TOTAL}" >> $GITHUB_OUTPUT
+          echo "critical=${CRITICAL}" >> $GITHUB_OUTPUT
+          echo "high=${HIGH}" >> $GITHUB_OUTPUT
+          echo "medium=${MEDIUM}" >> $GITHUB_OUTPUT
+          echo "low=${LOW}" >> $GITHUB_OUTPUT
+          
+          echo "🔍 Vulnerabilities Found:"
+          echo "   Critical: ${CRITICAL}"
+          echo "   High: ${HIGH}"
+          echo "   Medium: ${MEDIUM}"
+          echo "   Low: ${LOW}"
+          echo "   Total: ${TOTAL}"
+
+      - name: Save Docker image to tarball
+        run: docker save ${{ steps.set-image.outputs.image }} -o /tmp/docker-image.tar
+
+      - name: Upload Artifacts (SBOM & Scan)
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports
+          path: |
+            bom.json
+            vulnerabilities.json
+          retention-days: 7
+
+      - name: Upload Docker Image Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp/docker-image.tar
+          retention-days: 7
+
+      - name: Record Build End Time
+        id: end-time
+        run: echo "time=$(date +%s)" >> $GITHUB_OUTPUT
+
   policy-gate:
     name: 2 - Enforce Security Policy
     runs-on: ubuntu-latest
@@ -77,40 +174,26 @@ jobs:
           jq -n --slurpfile grype vulnerabilities.json --slurpfile syft bom.json \
             '{"vulnerabilities": $grype[0], "sbom": $syft[0]}' > input.json
 
-      # --- THIS IS THE CORRECTED STEP ---
       - name: Run OPA Policy Gate
         id: opa_eval
         run: |
           # Evaluate allow policy
-          # We add 2>&1 to capture compile errors, || true to prevent the step from exiting
           RESULT=$(opa eval -i input.json -d ./policy 'data.main.allow' --format=json 2>&1) || true
           PASSED=$(echo "$RESULT" | jq -r '.result[0].expressions[0].value // "false"')
           echo "passed=${PASSED}" >> $GITHUB_OUTPUT
           
           # Get violation details
-          VIOLATIONS_JSON=$(opa eval -i input.json -d ./policy 'data.main.deny' --format=json 2>/dev/null || echo '{"result":[{"expressions":[{"value":[]}]}]}')
-          VIOLATION_COUNT=$(echo "$VIOLATIONS_JSON" | jq -r '.result[0].expressions[0].value | length')
+          VIOLATIONS=$(opa eval -i input.json -d ./policy 'data.main.deny' --format=json 2>/dev/null || echo '{"result":[{"expressions":[{"value":[]}]}]}')
+          VIOLATION_COUNT=$(echo "$VIOLATIONS" | jq -r '.result[0].expressions[0].value | length')
           echo "violations=${VIOLATION_COUNT}" >> $GITHUB_OUTPUT
           
           echo "🛡️ Policy Evaluation Results:"
           echo "   Status: ${PASSED}"
           echo "   Violations: ${VIOLATION_COUNT}"
           
-          # --- ROBUSTNESS FIX ---
-          # Check if the policy FAILED
           if [ "$PASSED" != "true" ]; then
             echo "❌ OPA Policy FAILED - Violations found:"
-            
-            # Check if there are any violations to print
-            if [ "$VIOLATION_COUNT" -gt 0 ]; then
-              # If there are violations, print them
-              echo "$VIOLATIONS_JSON" | jq -r '.result[0].expressions[0].value[]'
-            else
-              # If PASSED=false but COUNT=0, the policy is broken
-              echo "Policy evaluation failed, but no deny messages were generated."
-              echo "This may indicate a syntax error in the policy or an error in the OPA command."
-              echo "Raw 'allow' evaluation output: $RESULT"
-            fi
+            echo "$VIOLATIONS" | jq -r '.result[0].expressions[0].value[]'
             exit 1
           fi
           
@@ -121,9 +204,6 @@ jobs:
         run: echo "time=$(date +%s)" >> $GITHUB_OUTPUT
 
   sign-and-publish:
-# ... (This job and the 'metrics' job are identical and correct) ...
-# ... (No changes are needed) ...
-# ...
     name: 3 - Attest and Publish
     runs-on: ubuntu-latest
     needs: [policy-gate]
@@ -131,49 +211,61 @@ jobs:
       contents: read
       packages: write
       id-token: write
+
     outputs:
       sign_start_time: ${{ steps.sign-start.outputs.time }}
       sign_end_time: ${{ steps.sign-end.outputs.time }}
       image_digest: ${{ steps.digest.outputs.digest }}
       signature_verified: ${{ steps.verify-sig.outputs.verified }}
       attestation_verified: ${{ steps.verify-att.outputs.verified }}
+
     steps:
       - name: Record Signing Start Time
         id: sign-start
         run: echo "time=$(date +%s)" >> $GITHUB_OUTPUT
+
       - name: Checkout repo
         uses: actions/checkout@v4
+
       - name: Download Docker image artifact
         uses: actions/download-artifact@v4
         with:
           name: docker-image
           path: /tmp
+
       - name: Load Docker image
         run: docker load -i /tmp/docker-image.tar
+
       - name: Set IMAGE variable from upstream
         run: echo "IMAGE=${{ needs.policy-gate.outputs.image_tag }}" >> $GITHUB_OUTPUT
         id: setimage
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Push Docker image to registry
         run: docker push ${{ steps.setimage.outputs.IMAGE }}
+
       - name: Get image digest
         id: digest
         run: |
           DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' ${{ steps.setimage.outputs.IMAGE }})
           echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
           echo "🔐 Image Digest: ${DIGEST}"
+
       - name: Download SBOM artifact
         uses: actions/download-artifact@v4
         with:
           name: security-reports
           path: .
+
       - name: Install Sigstore/cosign
         uses: sigstore/cosign-installer@v3
+
       - name: Sign image with Cosign (keyless)
         env:
           COSIGN_EXPERIMENTAL: 1
@@ -181,6 +273,7 @@ jobs:
           echo "🔏 Signing image with Sigstore..."
           cosign sign --yes ${{ steps.digest.outputs.digest }}
           echo "✅ Image signed successfully"
+
       - name: Attach SBOM Attestation
         env:
           COSIGN_EXPERIMENTAL: 1
@@ -188,6 +281,7 @@ jobs:
           echo "📋 Attaching SBOM attestation..."
           cosign attest --yes --type cyclonedx --predicate ./bom.json ${{ steps.digest.outputs.digest }}
           echo "✅ SBOM attestation attached"
+
       - name: Verify Image Signature
         id: verify-sig
         env:
@@ -200,6 +294,7 @@ jobs:
             ${{ steps.digest.outputs.digest }}
           echo "verified=true" >> $GITHUB_OUTPUT
           echo "✅ Signature verified successfully"
+
       - name: Verify SBOM Attestation
         id: verify-att
         env:
@@ -213,9 +308,11 @@ jobs:
             ${{ steps.digest.outputs.digest }}
           echo "verified=true" >> $GITHUB_OUTPUT
           echo "✅ Attestation verified successfully"
+
       - name: Record Signing End Time
         id: sign-end
         run: echo "time=$(date +%s)" >> $GITHUB_OUTPUT
+
   metrics:
     name: 4 - Collect and Report Metrics
     runs-on: ubuntu-latest
@@ -223,9 +320,11 @@ jobs:
     if: always()
     permissions:
       contents: write
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
       - name: Calculate Pipeline Metrics
         id: calculate
         run: |
@@ -252,6 +351,7 @@ jobs:
           echo "   Policy Check: ${POLICY_DURATION}s"
           echo "   Sign & Publish: ${SIGN_DURATION}s"
           echo "   Total: ${TOTAL_DURATION}s"
+
       - name: Create Metrics Report
         run: |
           mkdir -p metrics
@@ -292,6 +392,7 @@ jobs:
           
           echo "📊 Metrics saved to metrics/run-${{ github.run_number }}.json"
           cat metrics/run-${{ github.run_number }}.json
+
       - name: Generate Markdown Report
         run: |
           cat > metrics/run-${{ github.run_number }}.md << EOF
@@ -343,12 +444,14 @@ jobs:
           EOF
           
           cat metrics/run-${{ github.run_number }}.md
+
       - name: Upload Metrics Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: pipeline-metrics
           path: metrics/
           retention-days: 90
+
       - name: Summary Comment
         run: |
           echo "## 📊 DevSecOps Pipeline Summary" >> $GITHUB_STEP_SUMMARY

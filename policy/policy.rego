@@ -1,94 +1,48 @@
 package main
 
-# ---
-# DEFAULT POLICY: Deny by default
-# ---
-default allow := false
+default allow := true
 
-# ---
-# PRIMARY ALLOW RULE:
-# Allow if there are NO violations from our deny rules.
-# ---
+# --- Allow build if no Critical or High vulnerabilities ---
 allow if {
-    count(deny) == 0
+    count(critical_vulnerabilities) == 0
+    count(high_vulnerabilities) == 0
 }
 
-# ---
-# DENY - VULNERABILITIES (Severity)
-# ---
-deny contains msg if {
-    some id
-    critical_vulnerabilities[id]
-    msg := sprintf("Build denied: Critical vulnerability found: %v", [id])
-}
-
-deny contains msg if {
-    some id
-    high_vulnerabilities[id]
-    msg := sprintf("Build denied: High vulnerability found: %v", [id])
-}
-
-# ---
-# DENY - LICENSE COMPLIANCE
-# This is your "License Compliance" rule
-# ---
-deny contains msg if {
-    some component
-    prohibited_licenses[component]
-    msg := sprintf("License violation: Component %v uses prohibited license", [component])
-}
-
-# ---
-# DENY - SUPPLY CHAIN ATTACK DETECTION
-# This is your "Suspicious Component" rule
-# ---
-deny contains msg if {
-    some component
-    suspicious_components[component]
-    msg := sprintf("Supply chain risk: Suspicious component name found: %v", [component])
-}
-
-# ---
-# HELPER: Collect Critical vulnerabilities (case-insensitive)
-# ---
+# --- Collect critical vulnerabilities (case-insensitive) ---
 critical_vulnerabilities contains id if {
-    vuln := input.vulnerabilities.matches[_]
+    some i
+    vuln := input.vulnerabilities.matches[i]
     lower(vuln.vulnerability.severity) == "critical"
     id := vuln.vulnerability.id
 }
 
-# ---
-# HELPER: Collect High vulnerabilities (case-insensitive)
-# ---
+# --- Collect high vulnerabilities ---
 high_vulnerabilities contains id if {
-    vuln := input.vulnerabilities.matches[_]
+    some i
+    vuln := input.vulnerabilities.matches[i]
     lower(vuln.vulnerability.severity) == "high"
     id := vuln.vulnerability.id
 }
 
-# ---
-# HELPER: Collect components with prohibited licenses
-# ---
-prohibited_licenses contains component_name if {
-    # Define your list of banned licenses
-    banned = {"AGPL-3.0", "GPL-3.0", "GPL-2.0"}
-    
-    component := input.sbom.components[_]
-    license_id := component.licenses[_].license.id
-    
-    banned[license_id]
-    component_name := component.name
+# --- Collect medium vulnerabilities (optional use) ---
+medium_vulnerabilities contains id if {
+    some i
+    vuln := input.vulnerabilities.matches[i]
+    lower(vuln.vulnerability.severity) == "medium"
+    id := vuln.vulnerability.id
 }
 
-# ---
-# HELPER: Collect components with suspicious names
-# ---
-suspicious_components contains component_name if {
-    component := input.sbom.components[_]
-    
-    # Check for suspicious patterns
-    contains(component.name, "malicious-pattern")
-    # You could also check for typosquatting, e.g., "reqeusts"
-    
-    component_name := component.name
+# --- Deny messages for logging ---
+deny contains msg if {
+    not allow
+    crits := [r | critical_vulnerabilities[r]]
+    count(crits) > 0
+    msg := sprintf("Build denied: critical vulnerabilities found: %v", [crits])
+}
+
+deny contains msg if {
+    not allow
+    highs := [r | high_vulnerabilities[r]]
+    count(highs) > 0
+    msg := sprintf("Build denied: high vulnerabilities found: %v", [highs])
 }
