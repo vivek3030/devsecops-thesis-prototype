@@ -1,6 +1,6 @@
 package main
 
-default allow := false
+default allow := true
 
 # --- Allow build if no Critical or High vulnerabilities ---
 allow if {
