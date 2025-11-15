@@ -168,6 +168,7 @@ jobs:
     permissions:
       contents: read
       packages: read
+      security-events: write
 
     outputs:
       sbom_components_count: ${{ steps.sbom-stats.outputs.count }}
@@ -176,6 +177,9 @@ jobs:
       high_count: ${{ steps.vuln-stats.outputs.high }}
       medium_count: ${{ steps.vuln-stats.outputs.medium }}
       low_count: ${{ steps.vuln-stats.outputs.low }}
+      sast_issues_found: ${{ steps.sast-stats.outputs.total }}
+      sast_critical: ${{ steps.sast-stats.outputs.critical }}
+      sast_high: ${{ steps.sast-stats.outputs.high }}
 
     steps:
       - name: "📋 Checkout Repository"
@@ -221,20 +225,20 @@ jobs:
           echo "📋 Component Breakdown:"
           jq -r '.components[] | "\(.name) - \(.version // "N/A")"' bom.json | head -10
 
-      - name: "🔍 Scan for Vulnerabilities (Grype)"
+      - name: "🔍 Scan for CVE Vulnerabilities (Grype)"
         run: |
           echo "🔍 Installing Grype vulnerability scanner..."
           curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
           
-          echo "🔍 Scanning SBOM for vulnerabilities..."
+          echo "🔍 Scanning SBOM for known CVEs..."
           grype sbom:bom.json -o json > vulnerabilities.json
           
-          echo "✅ Vulnerability scan complete"
+          echo "✅ CVE vulnerability scan complete"
 
-      - name: "📉 Extract Vulnerability Statistics"
+      - name: "📉 Extract CVE Vulnerability Statistics"
         id: vuln-stats
         run: |
-          echo "📊 Analyzing vulnerability scan results..."
+          echo "📊 Analyzing CVE vulnerability scan results..."
           
           TOTAL=$(jq '.matches | length' vulnerabilities.json)
           CRITICAL=$(jq '[.matches[] | select(.vulnerability.severity == "Critical")] | length' vulnerabilities.json)
@@ -249,28 +253,120 @@ jobs:
           echo "low=${LOW}" >> $GITHUB_OUTPUT
           
           echo ""
-          echo "🔍 ===== VULNERABILITY SUMMARY ====="
+          echo "🔍 ===== CVE VULNERABILITY SUMMARY ====="
           echo "   Critical: ${CRITICAL}"
           echo "   High:     ${HIGH}"
           echo "   Medium:   ${MEDIUM}"
           echo "   Low:      ${LOW}"
           echo "   --------------------------------"
           echo "   Total:    ${TOTAL}"
-          echo "===================================="
+          echo "========================================"
           echo ""
           
           # Show sample vulnerabilities if any exist
           if [ "$CRITICAL" -gt 0 ]; then
-            echo "⚠️ CRITICAL Vulnerabilities Detected:"
+            echo "⚠️ CRITICAL CVEs Detected:"
             jq -r '.matches[] | select(.vulnerability.severity == "Critical") | "  - \(.vulnerability.id): \(.artifact.name)"' vulnerabilities.json | head -5
           fi
           
           if [ "$HIGH" -gt 0 ]; then
-            echo "⚠️ HIGH Vulnerabilities Detected:"
+            echo "⚠️ HIGH CVEs Detected:"
             jq -r '.matches[] | select(.vulnerability.severity == "High") | "  - \(.vulnerability.id): \(.artifact.name)"' vulnerabilities.json | head -5
           fi
 
-      - name: "💾 Upload SBOM & Vulnerability Reports"
+      - name: "🔬 Static Application Security Testing (SAST) - Gosec"
+        run: |
+          echo "🔬 Installing Gosec for Go code analysis..."
+          curl -sfL https://raw.githubusercontent.com/securego/gosec/master/install.sh | sh -s -- -b /usr/local/bin
+          
+          echo "🔍 Running static code analysis on Go application..."
+          cd app
+          gosec -fmt=json -out=../gosec-report.json ./... || true
+          cd ..
+          
+          echo "✅ SAST scan complete"
+
+      - name: "📊 Extract SAST Statistics"
+        id: sast-stats
+        run: |
+          echo "📊 Analyzing SAST results..."
+          
+          # Check if gosec found any issues
+          if [ ! -f gosec-report.json ] || [ ! -s gosec-report.json ]; then
+            echo "⚠️ No SAST report generated"
+            echo "total=0" >> $GITHUB_OUTPUT
+            echo "critical=0" >> $GITHUB_OUTPUT
+            echo "high=0" >> $GITHUB_OUTPUT
+            echo "medium=0" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Extract issue counts
+          TOTAL=$(jq '.Issues | length' gosec-report.json 2>/dev/null || echo "0")
+          
+          # Gosec uses severity levels: HIGH, MEDIUM, LOW
+          # Map HIGH to Critical for consistency
+          CRITICAL=$(jq '[.Issues[] | select(.severity == "HIGH")] | length' gosec-report.json 2>/dev/null || echo "0")
+          HIGH=$(jq '[.Issues[] | select(.severity == "MEDIUM")] | length' gosec-report.json 2>/dev/null || echo "0")
+          MEDIUM=$(jq '[.Issues[] | select(.severity == "LOW")] | length' gosec-report.json 2>/dev/null || echo "0")
+          
+          echo "total=${TOTAL}" >> $GITHUB_OUTPUT
+          echo "critical=${CRITICAL}" >> $GITHUB_OUTPUT
+          echo "high=${HIGH}" >> $GITHUB_OUTPUT
+          echo "medium=${MEDIUM}" >> $GITHUB_OUTPUT
+          
+          echo ""
+          echo "🔬 ===== SAST (CODE) ISSUES SUMMARY ====="
+          echo "   Critical (HIGH): ${CRITICAL}"
+          echo "   High (MEDIUM):   ${HIGH}"
+          echo "   Medium (LOW):    ${MEDIUM}"
+          echo "   --------------------------------"
+          echo "   Total:           ${TOTAL}"
+          echo "========================================="
+          echo ""
+          
+          # Show detailed issues
+          if [ "$TOTAL" -gt 0 ]; then
+            echo "🔍 Code Security Issues Found:"
+            jq -r '.Issues[] | "  ⚠️ [\(.severity)] \(.rule_id): \(.details) (Line: \(.line))"' gosec-report.json | head -10
+            echo ""
+          fi
+
+      - name: "🔍 Trivy Container Scan (Additional Coverage)"
+        run: |
+          echo "🔍 Installing Trivy scanner..."
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+          
+          echo "🔍 Running Trivy container scan..."
+          trivy image --format json --output trivy-report.json ${{ steps.image-info.outputs.image-ref }} || true
+          
+          echo "✅ Trivy scan complete"
+
+      - name: "📊 Combine All Vulnerability Data"
+        run: |
+          echo "📊 Creating combined vulnerability report..."
+          
+          # Create a combined summary
+          cat > combined-vulnerabilities.json << EOF
+          {
+            "cve_scan": {
+              "tool": "Grype",
+              "results": $(cat vulnerabilities.json)
+            },
+            "sast_scan": {
+              "tool": "Gosec",
+              "results": $(cat gosec-report.json 2>/dev/null || echo '{"Issues":[]}')
+            },
+            "container_scan": {
+              "tool": "Trivy",
+              "results": $(cat trivy-report.json 2>/dev/null || echo '{"Results":[]}')
+            }
+          }
+          EOF
+          
+          echo "✅ Combined report created"
+
+      - name: "💾 Upload SBOM & All Vulnerability Reports"
         uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -278,6 +374,9 @@ jobs:
           path: |
             bom.json
             vulnerabilities.json
+            gosec-report.json
+            trivy-report.json
+            combined-vulnerabilities.json
           retention-days: 90
 
   # ============================================
@@ -321,14 +420,23 @@ jobs:
 
       - name: "🔍 Create OPA Input Data"
         run: |
-          echo "📝 Creating OPA input with scan results..."
+          echo "📝 Creating OPA input with all scan results..."
+          
+          # Read SAST results
+          if [ -f gosec-report.json ]; then
+            GOSEC_DATA=$(cat gosec-report.json)
+          else
+            GOSEC_DATA='{"Issues":[]}'
+          fi
           
           jq -n \
             --slurpfile grype vulnerabilities.json \
             --slurpfile syft bom.json \
+            --argjson gosec "$GOSEC_DATA" \
             '{
               "vulnerabilities": $grype[0],
               "sbom": $syft[0],
+              "sast": $gosec,
               "slsa_build": {
                 "level": 3,
                 "builder_id": "github-actions",
@@ -345,7 +453,8 @@ jobs:
           
           echo "✅ OPA input created"
           echo "📊 Input Summary:"
-          echo "   - Vulnerabilities: $(jq '.vulnerabilities.matches | length' input.json)"
+          echo "   - CVE Vulnerabilities: $(jq '.vulnerabilities.matches | length' input.json)"
+          echo "   - SAST Issues: $(jq '.sast.Issues | length' input.json)"
           echo "   - SBOM Components: $(jq '.sbom.components | length' input.json)"
           echo "   - SLSA Level: $(jq -r '.slsa_build.level' input.json)"
 
@@ -656,6 +765,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           
           echo "## 🔍 Vulnerability Scan" >> $GITHUB_STEP_SUMMARY
+          echo "### CVE Vulnerabilities (Dependencies)" >> $GITHUB_STEP_SUMMARY
           echo "| Severity | Count |" >> $GITHUB_STEP_SUMMARY
           echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| 🔴 Critical | ${{ needs.scan-and-analyze.outputs.critical_count || 0 }} |" >> $GITHUB_STEP_SUMMARY
@@ -663,6 +773,13 @@ jobs:
           echo "| 🟡 Medium | ${{ needs.scan-and-analyze.outputs.medium_count || 0 }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 🟢 Low | ${{ needs.scan-and-analyze.outputs.low_count || 0 }} |" >> $GITHUB_STEP_SUMMARY
           echo "| **Total** | **${{ needs.scan-and-analyze.outputs.vulnerabilities_found || 0 }}** |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Code Security Issues (SAST)" >> $GITHUB_STEP_SUMMARY
+          echo "| Severity | Count |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 🔴 Critical | ${{ needs.scan-and-analyze.outputs.sast_critical || 0 }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🟠 High | ${{ needs.scan-and-analyze.outputs.sast_high || 0 }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Total** | **${{ needs.scan-and-analyze.outputs.sast_issues_found || 0 }}** |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
           echo "## 🛡️ Policy Enforcement" >> $GITHUB_STEP_SUMMARY
