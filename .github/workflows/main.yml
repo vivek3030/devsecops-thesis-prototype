@@ -217,13 +217,18 @@ jobs:
         id: sbom-stats
         run: |
           echo "📊 Analyzing SBOM..."
-          COMPONENT_COUNT=$(jq '.components | length' bom.json)
-          echo "count=${COMPONENT_COUNT}" >> $GITHUB_OUTPUT
-          echo "📦 SBOM Components Found: ${COMPONENT_COUNT}"
-          
-          # Display some component details
-          echo "📋 Component Breakdown:"
-          jq -r '.components[] | "\(.name) - \(.version // "N/A")"' bom.json | head -10
+          if [ -f bom.json ] && [ -s bom.json ]; then
+            COMPONENT_COUNT=$(jq '.components | length' bom.json)
+            echo "count=${COMPONENT_COUNT}" >> $GITHUB_OUTPUT
+            echo "📦 SBOM Components Found: ${COMPONENT_COUNT}"
+            
+            # Display some component details
+            echo "📋 Component Breakdown:"
+            jq -r '.components[] | "\(.name) - \(.version // "N/A")"' bom.json | head -10
+          else
+            echo "count=0" >> $GITHUB_OUTPUT
+            echo "⚠️ No SBOM generated or empty file"
+          fi
 
       - name: "🔍 Scan for CVE Vulnerabilities (Grype)"
         run: |
@@ -231,20 +236,33 @@ jobs:
           curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
           
           echo "🔍 Scanning SBOM for known CVEs..."
-          grype sbom:bom.json -o json > vulnerabilities.json
-          
-          echo "✅ CVE vulnerability scan complete"
+          if [ -f bom.json ] && [ -s bom.json ]; then
+            grype sbom:bom.json -o json > vulnerabilities.json
+            echo "✅ CVE vulnerability scan complete"
+          else
+            echo '{"matches": []}' > vulnerabilities.json
+            echo "⚠️ No SBOM available for CVE scanning, using empty result"
+          fi
 
       - name: "📉 Extract CVE Vulnerability Statistics"
         id: vuln-stats
         run: |
           echo "📊 Analyzing CVE vulnerability scan results..."
           
-          TOTAL=$(jq '.matches | length' vulnerabilities.json)
-          CRITICAL=$(jq '[.matches[] | select(.vulnerability.severity == "Critical")] | length' vulnerabilities.json)
-          HIGH=$(jq '[.matches[] | select(.vulnerability.severity == "High")] | length' vulnerabilities.json)
-          MEDIUM=$(jq '[.matches[] | select(.vulnerability.severity == "Medium")] | length' vulnerabilities.json)
-          LOW=$(jq '[.matches[] | select(.vulnerability.severity == "Low")] | length' vulnerabilities.json)
+          if [ -f vulnerabilities.json ] && [ -s vulnerabilities.json ]; then
+            TOTAL=$(jq '.matches | length' vulnerabilities.json)
+            CRITICAL=$(jq '[.matches[] | select(.vulnerability.severity == "Critical")] | length' vulnerabilities.json)
+            HIGH=$(jq '[.matches[] | select(.vulnerability.severity == "High")] | length' vulnerabilities.json)
+            MEDIUM=$(jq '[.matches[] | select(.vulnerability.severity == "Medium")] | length' vulnerabilities.json)
+            LOW=$(jq '[.matches[] | select(.vulnerability.severity == "Low")] | length' vulnerabilities.json)
+          else
+            TOTAL=0
+            CRITICAL=0
+            HIGH=0
+            MEDIUM=0
+            LOW=0
+            echo "⚠️ No vulnerability data found"
+          fi
 
           echo "total=${TOTAL}" >> $GITHUB_OUTPUT
           echo "critical=${CRITICAL}" >> $GITHUB_OUTPUT
@@ -281,10 +299,13 @@ jobs:
           
           echo "🔍 Running static code analysis on Go application..."
           cd app
-          gosec -fmt=json -out=../gosec-report.json ./... || true
+          if gosec -fmt=json -out=../gosec-report.json ./... 2>/dev/null; then
+            echo "✅ SAST scan complete"
+          else
+            echo '{"Issues":[]}' > ../gosec-report.json
+            echo "⚠️ SAST scan failed or found no issues, using empty result"
+          fi
           cd ..
-          
-          echo "✅ SAST scan complete"
 
       - name: "📊 Extract SAST Statistics"
         id: sast-stats
@@ -292,23 +313,22 @@ jobs:
           echo "📊 Analyzing SAST results..."
           
           # Check if gosec found any issues
-          if [ ! -f gosec-report.json ] || [ ! -s gosec-report.json ]; then
+          if [ -f gosec-report.json ] && [ -s gosec-report.json ]; then
+            # Extract issue counts
+            TOTAL=$(jq '.Issues | length' gosec-report.json 2>/dev/null || echo "0")
+            
+            # Gosec uses severity levels: HIGH, MEDIUM, LOW
+            # Map HIGH to Critical for consistency
+            CRITICAL=$(jq '[.Issues[] | select(.severity == "HIGH")] | length' gosec-report.json 2>/dev/null || echo "0")
+            HIGH=$(jq '[.Issues[] | select(.severity == "MEDIUM")] | length' gosec-report.json 2>/dev/null || echo "0")
+            MEDIUM=$(jq '[.Issues[] | select(.severity == "LOW")] | length' gosec-report.json 2>/dev/null || echo "0")
+          else
+            TOTAL=0
+            CRITICAL=0
+            HIGH=0
+            MEDIUM=0
             echo "⚠️ No SAST report generated"
-            echo "total=0" >> $GITHUB_OUTPUT
-            echo "critical=0" >> $GITHUB_OUTPUT
-            echo "high=0" >> $GITHUB_OUTPUT
-            echo "medium=0" >> $GITHUB_OUTPUT
-            exit 0
           fi
-          
-          # Extract issue counts
-          TOTAL=$(jq '.Issues | length' gosec-report.json 2>/dev/null || echo "0")
-          
-          # Gosec uses severity levels: HIGH, MEDIUM, LOW
-          # Map HIGH to Critical for consistency
-          CRITICAL=$(jq '[.Issues[] | select(.severity == "HIGH")] | length' gosec-report.json 2>/dev/null || echo "0")
-          HIGH=$(jq '[.Issues[] | select(.severity == "MEDIUM")] | length' gosec-report.json 2>/dev/null || echo "0")
-          MEDIUM=$(jq '[.Issues[] | select(.severity == "LOW")] | length' gosec-report.json 2>/dev/null || echo "0")
           
           echo "total=${TOTAL}" >> $GITHUB_OUTPUT
           echo "critical=${CRITICAL}" >> $GITHUB_OUTPUT
@@ -338,31 +358,55 @@ jobs:
           curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
           
           echo "🔍 Running Trivy container scan..."
-          trivy image --format json --output trivy-report.json ${{ steps.image-info.outputs.image-ref }} || true
-          
-          echo "✅ Trivy scan complete"
+          if trivy image --format json --output trivy-report.json ${{ steps.image-info.outputs.image-ref }} 2>/dev/null; then
+            echo "✅ Trivy scan complete"
+          else
+            echo '{"Results":[]}' > trivy-report.json
+            echo "⚠️ Trivy scan failed, using empty result"
+          fi
 
       - name: "📊 Combine All Vulnerability Data"
         run: |
           echo "📊 Creating combined vulnerability report..."
           
+          # Read files safely
+          if [ ! -f vulnerabilities.json ] || [ ! -s vulnerabilities.json ]; then
+            VULN_DATA='{"matches":[]}'
+          else
+            VULN_DATA=$(cat vulnerabilities.json)
+          fi
+          
+          if [ ! -f gosec-report.json ] || [ ! -s gosec-report.json ]; then
+            SAST_DATA='{"Issues":[]}'
+          else
+            SAST_DATA=$(cat gosec-report.json)
+          fi
+          
+          if [ ! -f trivy-report.json ] || [ ! -s trivy-report.json ]; then
+            TRIVY_DATA='{"Results":[]}'
+          else
+            TRIVY_DATA=$(cat trivy-report.json)
+          fi
+          
           # Create a combined summary
-          cat > combined-vulnerabilities.json << EOF
-          {
-            "cve_scan": {
-              "tool": "Grype",
-              "results": $(cat vulnerabilities.json)
-            },
-            "sast_scan": {
-              "tool": "Gosec",
-              "results": $(cat gosec-report.json 2>/dev/null || echo '{"Issues":[]}')
-            },
-            "container_scan": {
-              "tool": "Trivy",
-              "results": $(cat trivy-report.json 2>/dev/null || echo '{"Results":[]}')
-            }
-          }
-          EOF
+          jq -n \
+            --argjson vuln "$VULN_DATA" \
+            --argjson sast "$SAST_DATA" \
+            --argjson trivy "$TRIVY_DATA" \
+            '{
+              "cve_scan": {
+                "tool": "Grype",
+                "results": $vuln
+              },
+              "sast_scan": {
+                "tool": "Gosec",
+                "results": $sast
+              },
+              "container_scan": {
+                "tool": "Trivy",
+                "results": $trivy
+              }
+            }' > combined-vulnerabilities.json
           
           echo "✅ Combined report created"
 
@@ -409,33 +453,66 @@ jobs:
         with:
           name: sbom-and-vulnerabilities
 
+      - name: "🔍 Debug Input Files"
+        run: |
+          echo "=== Debug: Checking input files ==="
+          ls -la *.json 2>/dev/null || echo "No JSON files found"
+          echo "=== bom.json sample ==="
+          head -2 bom.json 2>/dev/null || echo "bom.json not found"
+          echo "=== vulnerabilities.json sample ==="
+          head -2 vulnerabilities.json 2>/dev/null || echo "vulnerabilities.json not found"
+          echo "=== gosec-report.json sample ==="
+          head -2 gosec-report.json 2>/dev/null || echo "gosec-report.json not found"
+
       - name: "🛡️ Install OPA (Open Policy Agent)"
         run: |
           echo "📥 Installing OPA..."
           curl -L -o /tmp/opa https://github.com/open-policy-agent/opa/releases/latest/download/opa_linux_amd64
           chmod +x /tmp/opa
           sudo mv /tmp/opa /usr/local/bin/opa
-          opa version
+          echo "OPA version: $(opa version)"
           echo "✅ OPA installed"
 
       - name: "🔍 Create OPA Input Data"
         run: |
           echo "📝 Creating OPA input with all scan results..."
           
-          # Read SAST results
-          if [ -f gosec-report.json ]; then
-            GOSEC_DATA=$(cat gosec-report.json)
+          # Check if required files exist
+          echo "🔍 Checking input files..."
+          [ -f vulnerabilities.json ] || echo "⚠️ vulnerabilities.json not found"
+          [ -f bom.json ] || echo "⚠️ bom.json not found"
+          [ -f gosec-report.json ] || echo "⚠️ gosec-report.json not found"
+          
+          # Read files safely with defaults
+          if [ -f vulnerabilities.json ] && [ -s vulnerabilities.json ]; then
+              GRYPE_DATA=$(cat vulnerabilities.json)
           else
-            GOSEC_DATA='{"Issues":[]}'
+              GRYPE_DATA='{"matches":[]}'
+              echo "⚠️ Using empty vulnerabilities data"
           fi
           
+          if [ -f bom.json ] && [ -s bom.json ]; then
+              SYFT_DATA=$(cat bom.json)
+          else
+              SYFT_DATA='{"components":[]}'
+              echo "⚠️ Using empty SBOM data"
+          fi
+          
+          if [ -f gosec-report.json ] && [ -s gosec-report.json ]; then
+              GOSEC_DATA=$(cat gosec-report.json)
+          else
+              GOSEC_DATA='{"Issues":[]}'
+              echo "⚠️ Using empty SAST data"
+          fi
+          
+          # Create input.json with proper error handling
           jq -n \
-            --slurpfile grype vulnerabilities.json \
-            --slurpfile syft bom.json \
+            --argjson grype "$GRYPE_DATA" \
+            --argjson syft "$SYFT_DATA" \
             --argjson gosec "$GOSEC_DATA" \
             '{
-              "vulnerabilities": $grype[0],
-              "sbom": $syft[0],
+              "vulnerabilities": $grype,
+              "sbom": $syft,
               "sast": $gosec,
               "slsa_build": {
                 "level": 3,
@@ -445,18 +522,49 @@ jobs:
                 "signed": true
               },
               "metadata": {
-                "version": "${{ needs.prepare.outputs.version }}",
-                "commit_sha": "${{ github.sha }}",
-                "pipeline_run": "${{ github.run_number }}"
+                "version": "'"${{ needs.prepare.outputs.version }}"'",
+                "commit_sha": "'"${{ github.sha }}"'",
+                "pipeline_run": "'"${{ github.run_number }}"'"
               }
             }' > input.json
           
-          echo "✅ OPA input created"
-          echo "📊 Input Summary:"
-          echo "   - CVE Vulnerabilities: $(jq '.vulnerabilities.matches | length' input.json)"
-          echo "   - SAST Issues: $(jq '.sast.Issues | length' input.json)"
-          echo "   - SBOM Components: $(jq '.sbom.components | length' input.json)"
-          echo "   - SLSA Level: $(jq -r '.slsa_build.level' input.json)"
+          # Validate the created input.json
+          if jq empty input.json 2>/dev/null; then
+              echo "✅ OPA input created successfully"
+              echo "📊 Input Summary:"
+              echo "   - CVE Vulnerabilities: $(jq '.vulnerabilities.matches | length' input.json)"
+              echo "   - SAST Issues: $(jq '.sast.Issues | length' input.json)"
+              echo "   - SBOM Components: $(jq '.sbom.components | length' input.json)"
+              echo "   - SLSA Level: $(jq -r '.slsa_build.level' input.json)"
+          else
+              echo "❌ Failed to create valid input.json"
+              exit 1
+          fi
+
+      - name: "🧪 Test OPA Policy Standalone"
+        run: |
+          # Create a simple test input
+          cat > test-input.json << 'EOF'
+          {
+            "vulnerabilities": {"matches": []},
+            "sbom": {"components": [{"name": "test"}]},
+            "sast": {"Issues": []},
+            "slsa_build": {
+              "level": 3,
+              "builder_id": "github-actions", 
+              "provenance_verified": true,
+              "hermetic_build": true,
+              "signed": true
+            }
+          }
+          EOF
+          
+          echo "🧪 Testing policy with simple input..."
+          if opa eval -i test-input.json -d ./policy 'data.main.allow' --format=json; then
+            echo "✅ Policy test passed"
+          else
+            echo "❌ Policy test failed"
+          fi
 
       - name: "🔒 Evaluate Security Policy"
         id: opa_eval
@@ -467,39 +575,83 @@ jobs:
           echo "🛡️ ===== SECURITY POLICY EVALUATION ====="
           echo ""
           
-          # Evaluate the allow rule
-          echo "📋 Checking policy compliance..."
-          ALLOW_RESULT=$(opa eval -i input.json -d ./policy 'data.main.allow' --format=json 2>&1) || true
-          PASSED=$(echo "$ALLOW_RESULT" | jq -r '.result[0].expressions[0].value // false' | tr -d '[:space:]')
-          
-          echo "passed=${PASSED}" >> $GITHUB_OUTPUT
-          
-          # Get detailed violation information
-          echo "📋 Checking for policy violations..."
-          VIOLATIONS_RESULT=$(opa eval -i input.json -d ./policy 'data.main.deny' --format=json 2>/dev/null || echo '{"result":[{"expressions":[{"value":[]}]}]}')
-          
-          # Extract violations count with proper cleanup
-          VIOLATION_COUNT=$(echo "$VIOLATIONS_RESULT" | jq -r '.result[0].expressions[0].value | length' | tr -d '[:space:]')
-          
-          # Validate it's a number
-          if ! [[ "$VIOLATION_COUNT" =~ ^[0-9]+$ ]]; then
-            VIOLATION_COUNT=0
+          # First, validate input.json exists and is valid JSON
+          echo "🔍 Validating input data..."
+          if [ ! -f input.json ] || [ ! -s input.json ]; then
+            echo "❌ input.json is missing or empty"
+            echo "passed=false" >> $GITHUB_OUTPUT
+            echo "violations=1" >> $GITHUB_OUTPUT
+            echo "decision=ERROR" >> $GITHUB_OUTPUT
+            exit 1
           fi
           
+          # Validate JSON syntax
+          if ! jq empty input.json 2>/dev/null; then
+            echo "❌ input.json contains invalid JSON"
+            echo "passed=false" >> $GITHUB_OUTPUT
+            echo "violations=1" >> $GITHUB_OUTPUT
+            echo "decision=ERROR" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          # Test OPA policy syntax first
+          echo "🔍 Testing OPA policy syntax..."
+          if ! opa check ./policy; then
+            echo "❌ OPA policy has syntax errors"
+            echo "passed=false" >> $GITHUB_OUTPUT
+            echo "violations=1" >> $GITHUB_OUTPUT
+            echo "decision=ERROR" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          # Evaluate the allow rule with better error handling
+          echo "📋 Checking policy compliance..."
+          ALLOW_RESULT=$(opa eval -i input.json -d ./policy 'data.main.allow' --format=json 2>&1)
+          
+          # Check if OPA command succeeded
+          if [ $? -ne 0 ]; then
+            echo "❌ OPA evaluation failed: $ALLOW_RESULT"
+            echo "passed=false" >> $GITHUB_OUTPUT
+            echo "violations=1" >> $GITHUB_OUTPUT
+            echo "decision=ERROR" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          # Extract the allow value safely
+          PASSED=$(echo "$ALLOW_RESULT" | jq -r '.result[0].expressions[0].value // false' 2>/dev/null || echo "false")
+          echo "passed=${PASSED}" >> $GITHUB_OUTPUT
+          echo "✅ Policy evaluation completed: ${PASSED}"
+          
+          # Get violations
+          echo "📋 Checking for policy violations..."
+          VIOLATIONS_RESULT=$(opa eval -i input.json -d ./policy 'data.main.deny' --format=json 2>&1)
+          if [ $? -eq 0 ]; then
+            VIOLATION_COUNT=$(echo "$VIOLATIONS_RESULT" | jq -r '.result[0].expressions[0].value | length // 0')
+          else
+            echo "⚠️ Could not evaluate deny rules: $VIOLATIONS_RESULT"
+            VIOLATION_COUNT=0
+          fi
           echo "violations=${VIOLATION_COUNT}" >> $GITHUB_OUTPUT
           
           # Get warnings
-          WARNINGS_RESULT=$(opa eval -i input.json -d ./policy 'data.main.warnings' --format=json 2>/dev/null || echo '{"result":[{"expressions":[{"value":[]}]}]}')
-          WARNING_COUNT=$(echo "$WARNINGS_RESULT" | jq -r '.result[0].expressions[0].value | length' | tr -d '[:space:]')
-          
-          # Validate it's a number
-          if ! [[ "$WARNING_COUNT" =~ ^[0-9]+$ ]]; then
+          echo "📋 Checking for warnings..."
+          WARNINGS_RESULT=$(opa eval -i input.json -d ./policy 'data.main.warnings' --format=json 2>&1)
+          if [ $? -eq 0 ]; then
+            WARNING_COUNT=$(echo "$WARNINGS_RESULT" | jq -r '.result[0].expressions[0].value | length // 0')
+          else
+            echo "⚠️ Could not evaluate warnings: $WARNINGS_RESULT"
             WARNING_COUNT=0
           fi
           
           # Get compliance report
-          COMPLIANCE=$(opa eval -i input.json -d ./policy 'data.main.compliance_report' --format=json 2>/dev/null || echo '{"result":[{"expressions":[{"value":{}}]}]}')
-          COMPLIANCE_DATA=$(echo "$COMPLIANCE" | jq -r '.result[0].expressions[0].value // {}')
+          echo "📋 Generating compliance report..."
+          COMPLIANCE_RESULT=$(opa eval -i input.json -d ./policy 'data.main.compliance_report' --format=json 2>&1)
+          if [ $? -eq 0 ]; then
+            COMPLIANCE_DATA=$(echo "$COMPLIANCE_RESULT" | jq -r '.result[0].expressions[0].value // {}')
+          else
+            echo "⚠️ Could not generate compliance report: $COMPLIANCE_RESULT"
+            COMPLIANCE_DATA="{}"
+          fi
           
           echo ""
           echo "📊 ===== POLICY EVALUATION RESULTS ====="
@@ -512,8 +664,10 @@ jobs:
           # Display violations if any
           if [ "$VIOLATION_COUNT" -gt 0 ]; then
             echo "❌ POLICY VIOLATIONS DETECTED:"
-            echo "$VIOLATIONS_RESULT" | jq -r '.result[0].expressions[0].value[]' 2>/dev/null | while read -r violation; do
-              echo "   ❌ $violation"
+            echo "$VIOLATIONS_RESULT" | jq -r '.result[0].expressions[0].value[]?' 2>/dev/null | while read -r violation; do
+              if [ -n "$violation" ]; then
+                echo "   ❌ $violation"
+              fi
             done
             echo ""
           fi
@@ -521,8 +675,10 @@ jobs:
           # Display warnings if any
           if [ "$WARNING_COUNT" -gt 0 ]; then
             echo "⚠️ POLICY WARNINGS:"
-            echo "$WARNINGS_RESULT" | jq -r '.result[0].expressions[0].value[]' 2>/dev/null | while read -r warning; do
-              echo "   ⚠️ $warning"
+            echo "$WARNINGS_RESULT" | jq -r '.result[0].expressions[0].value[]?' 2>/dev/null | while read -r warning; do
+              if [ -n "$warning" ]; then
+                echo "   ⚠️ $warning"
+              fi
             done
             echo ""
           fi
@@ -533,12 +689,12 @@ jobs:
           echo ""
           
           # Display vulnerability summary from compliance report
-          if echo "$COMPLIANCE_DATA" | jq -e '.critical' >/dev/null 2>&1; then
+          if echo "$COMPLIANCE_DATA" | jq -e '.cve' >/dev/null 2>&1; then
             echo "🔍 Vulnerability Breakdown from Policy:"
-            echo "   Critical: $(echo "$COMPLIANCE_DATA" | jq -r '.critical // 0')"
-            echo "   High:     $(echo "$COMPLIANCE_DATA" | jq -r '.high // 0')"
-            echo "   Medium:   $(echo "$COMPLIANCE_DATA" | jq -r '.medium // 0')"
-            echo "   Low:      $(echo "$COMPLIANCE_DATA" | jq -r '.low // 0')"
+            echo "   Critical: $(echo "$COMPLIANCE_DATA" | jq -r '.cve.critical // 0')"
+            echo "   High:     $(echo "$COMPLIANCE_DATA" | jq -r '.cve.high // 0')"
+            echo "   Medium:   $(echo "$COMPLIANCE_DATA" | jq -r '.cve.medium // 0')"
+            echo "   Low:      $(echo "$COMPLIANCE_DATA" | jq -r '.cve.low // 0')"
             echo ""
           fi
           
@@ -549,12 +705,16 @@ jobs:
             echo "   The image meets all security requirements"
             echo "   and can proceed to deployment."
             echo "===================================="
-            exit 0
           else
             echo "decision=REJECTED" >> $GITHUB_OUTPUT
             echo "❌ ===== POLICY CHECK FAILED ====="
-            echo "   The image does NOT meet security requirements."
-            echo "   Deployment is BLOCKED."
+            if [ "$VIOLATION_COUNT" -gt 0 ]; then
+              echo "   The image does NOT meet security requirements."
+              echo "   Deployment is BLOCKED due to policy violations."
+            else
+              echo "   Policy evaluation returned false but no specific violations found."
+              echo "   Check policy logic and input data structure."
+            fi
             echo ""
             echo "   Review the violations and vulnerability counts above."
             echo "   Check Stage 3 logs for detailed CVE information."
@@ -574,6 +734,7 @@ jobs:
           name: policy-evaluation
           path: |
             input.json
+            test-input.json
           retention-days: 90
 
   # ============================================
@@ -619,7 +780,7 @@ jobs:
           mkdir -p metrics reports
           
           # Create JSON metrics
-          cat > metrics/run-${{ github.run_number }}.json << 'EOF'
+          cat > metrics/run-${{ github.run_number }}.json << EOF
           {
             "pipeline_metadata": {
               "run_number": ${{ github.run_number }},

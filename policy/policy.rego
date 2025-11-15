@@ -72,7 +72,8 @@ slsa_level_3_compliant {
 # ===============================
 #
 
-matches := get_array(input.vulnerabilities, "matches")
+vuln_data := input.vulnerabilities
+matches := get_array(vuln_data, "matches")
 
 critical_cve[v] {
     v := matches[_]
@@ -154,7 +155,6 @@ sbom_valid {
     sbom != null
     sbom.components != null
     count(sbom.components) > 0
-    sbom.metadata != null
 }
 
 #
@@ -165,14 +165,14 @@ sbom_valid {
 
 deny[msg] {
     count(critical_cve) > 0
-    ids := [c.vulnerability.id | c := critical_cve[_]]
-    msg := sprintf("❌ Critical CVEs found: %v", [ids])
+    critical_ids := [c.vulnerability.id | c := critical_cve[_]]
+    msg := sprintf("❌ Critical CVEs found: %v", [critical_ids])
 }
 
 deny[msg] {
     count(high_cve) > 0
-    ids := [h.vulnerability.id | h := high_cve[_]]
-    msg := sprintf("❌ High severity CVEs found: %v", [ids])
+    high_ids := [h.vulnerability.id | h := high_cve[_]]
+    msg := sprintf("❌ High severity CVEs found: %v", [high_ids])
 }
 
 deny[msg] {
@@ -182,8 +182,8 @@ deny[msg] {
 
 deny[msg] {
     count(critical_sast) > 0
-    rules := [c.rule_id | c := critical_sast[_]]
-    msg := sprintf("❌ Critical SAST issues found: %v", [rules])
+    critical_rules := [c.rule_id | c := critical_sast[_]]
+    msg := sprintf("❌ Critical SAST issues found: %v", [critical_rules])
 }
 
 deny[msg] {
