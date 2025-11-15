@@ -8,11 +8,11 @@ default compliance_report = {}
 ###################################
 # Utility: safe value extraction
 ###################################
-safe_get(obj, key, default) = val {
+safe_get(obj, key, defval) = val {
     some obj[key]
     val := obj[key]
 } else = val {
-    val := default
+    val := defval
 }
 
 ###################################
