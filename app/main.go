@@ -6,8 +6,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"crypto/md5"
-	"unsafe"
 
 	"github.com/gorilla/mux"
 )
@@ -22,18 +20,9 @@ var (
 // Simple HTTP handler
 func helloHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
-
-	// Intentional vulnerability: Use of weak MD5 hash
-	hash := md5.Sum([]byte("test"))
-	hashStr := fmt.Sprintf("%x", hash)
-
-	// Intentional vulnerability: Unsafe pointer arithmetic
-	ptr := unsafe.Pointer(&hash)
-	_ = ptr
-
 	w.Write([]byte(fmt.Sprintf(
-		"Hello, secure world! This is the SLSA L3 test application.\n\nVersion: %s\nBuild Date: %s\nCommit: %s\nHash: %s",
-		Version, BuildDate, VCSRef, hashStr,
+		"Hello, secure world! This is the SLSA L3 test application.\n\nVersion: %s\nBuild Date: %s\nCommit: %s",
+		Version, BuildDate, VCSRef,
 	)))
 }
 
@@ -41,13 +30,6 @@ func helloHandler(w http.ResponseWriter, r *http.Request) {
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-
-	// Intentional vulnerability: Hardcoded credentials
-	apiKey := "sk_live_51234567890abcdefghijklmnop"
-	dbPassword := "admin123456"
-	_ = apiKey
-	_ = dbPassword
-
 	fmt.Fprintf(w, `{"status":"healthy","version":"%s"}`, Version)
 }
 
