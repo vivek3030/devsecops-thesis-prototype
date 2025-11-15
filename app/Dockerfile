@@ -1,8 +1,3 @@
-# ============================================
-# SLSA L3 Hardened Multi-Architecture Dockerfile
-# Using Chainguard Images (TAGGED)
-# ============================================
-
 # --- Build Stage ---
 FROM cgr.dev/chainguard/go:latest-dev AS build
 
@@ -14,13 +9,13 @@ ARG VCS_REF
 
 WORKDIR /src
 
-# Ensure go.sum integrity
+# Copy module files first – verify checksums
 COPY go.mod go.sum ./
 RUN go mod download && go mod verify
 
+# Now copy the rest of the source
 COPY . .
 
-# Build securely
 RUN CGO_ENABLED=0 \
     GOOS=${TARGETOS} \
     GOARCH=${TARGETARCH} \
@@ -32,7 +27,7 @@ RUN CGO_ENABLED=0 \
         -X main.VCSRef=${VCS_REF}" \
       -o /app/server .
 
-# --- Final Stage (distroless, secure) ---
+# --- Final Stage ---
 FROM cgr.dev/chainguard/static:latest
 
 ARG VERSION=dev
@@ -44,20 +39,11 @@ LABEL org.opencontainers.image.title="SLSA L3 Demo Application" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.created="${BUILD_DATE}" \
       org.opencontainers.image.revision="${VCS_REF}" \
-      org.opencontainers.image.source="https://github.com/vivek3030/devsecops-thesis-prototype" \
-      security.slsa.level="3" \
-      org.opencontainers.image.vendor="Hochschule Albstadt-Sigmaringen" \
-      org.opencontainers.image.authors="Vivekkumar Kasundra" \
-      org.opencontainers.image.base.name="cgr.dev/chainguard/static" \
-      org.opencontainers.image.licenses="Apache-2.0"
+      security.slsa.level="3"
 
 COPY --from=build /app/server /usr/local/bin/server
 
 USER nonroot
-
 EXPOSE 8080
-
-ENV GODEBUG=madvdontneed=1 \
-    TZ=UTC
-
+ENV GODEBUG=madvdontneed=1 TZ=UTC
 ENTRYPOINT ["/usr/local/bin/server"]

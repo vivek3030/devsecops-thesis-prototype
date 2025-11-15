@@ -1,2 +1,2 @@
-github.com/gorilla/mux v1.8.0 h1:i40aqfkR1h2SlN9hojwV5ZA91wcXFOvkdNIeFDP5koMY=
-github.com/gorilla/mux v1.8.0/go.mod h1:DVbg23sWSpFRCP0SfiEN6jmj59UnW/n46BH5rLB71So=
+github.com/gorilla/mux v1.7.4 h1:VuZ8A82n6fFLpYvIA6kX4h8h6KHt1tJnK+YY6wLQ0fA=
+github.com/gorilla/mux v1.7.4/go.mod h1:1lud6UwP+6orDFRuTfBEV8e9/aOM/c4fVVCaMa2zaAs=
