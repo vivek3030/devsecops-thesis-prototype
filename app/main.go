@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/gorilla/mux"
 )
@@ -20,34 +21,42 @@ var (
 // Simple HTTP handler
 func helloHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(fmt.Sprintf(
+	if _, err := w.Write([]byte(fmt.Sprintf(
 		"Hello, secure world! This is the SLSA L3 test application.\n\nVersion: %s\nBuild Date: %s\nCommit: %s",
 		Version, BuildDate, VCSRef,
-	)))
+	))); err != nil {
+		log.Printf("Error writing hello response: %v", err)
+	}
 }
 
 // Health check endpoint
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, `{"status":"healthy","version":"%s"}`, Version)
+	if _, err := w.Write([]byte(fmt.Sprintf(`{"status":"healthy","version":"%s"}`, Version))); err != nil {
+		log.Printf("Error writing health response: %v", err)
+	}
 }
 
 // Readiness check endpoint
 func readyHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"status":"ready"}`))
+	if _, err := w.Write([]byte(`{"status":"ready"}`)); err != nil {
+		log.Printf("Error writing readiness response: %v", err)
+	}
 }
 
 // Version information endpoint
 func versionHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, `{
-		"version": "%s",
-		"buildDate": "%s",
-		"gitCommit": "%s"
-	}`, Version, BuildDate, VCSRef)
+	if _, err := w.Write([]byte(fmt.Sprintf(`{
+	"version": "%s",
+	"buildDate": "%s",
+	"gitCommit": "%s"
+}`, Version, BuildDate, VCSRef))); err != nil {
+		log.Printf("Error writing version response: %v", err)
+	}
 }
 
 func main() {
@@ -56,10 +65,8 @@ func main() {
 	helpFlag := flag.Bool("help", false, "Print help information and exit")
 	healthFlag := flag.Bool("health", false, "Perform health check and exit (for Docker HEALTHCHECK)")
 	port := flag.String("port", "8080", "Port to listen on")
-	
 	flag.Parse()
 
-	// Handle version flag
 	if *versionFlag {
 		fmt.Printf("Version:    %s\n", Version)
 		fmt.Printf("Build Date: %s\n", BuildDate)
@@ -67,7 +74,6 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Handle help flag
 	if *helpFlag {
 		fmt.Println("SLSA L3 Demo Application")
 		fmt.Println("\nUsage:")
@@ -80,14 +86,13 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Handle health check flag (for Docker HEALTHCHECK)
 	if *healthFlag {
 		resp, err := http.Get("http://localhost:" + *port + "/health")
 		if err != nil {
 			log.Fatalf("Health check failed: %v", err)
 		}
 		defer resp.Body.Close()
-		
+
 		if resp.StatusCode == http.StatusOK {
 			fmt.Println("Health check: OK")
 			os.Exit(0)
@@ -99,8 +104,6 @@ func main() {
 
 	// Create router
 	r := mux.NewRouter()
-	
-	// Register routes
 	r.HandleFunc("/", helloHandler).Methods("GET")
 	r.HandleFunc("/health", healthHandler).Methods("GET")
 	r.HandleFunc("/ready", readyHandler).Methods("GET")
@@ -113,8 +116,16 @@ func main() {
 	log.Printf("Git Commit: %s", VCSRef)
 	log.Printf("Listening on port %s...", *port)
 
-	// Start server
-	if err := http.ListenAndServe(":"+*port, r); err != nil {
+	// Use http.Server with timeouts
+	srv := &http.Server{
+		Addr:         ":" + *port,
+		Handler:      r,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Server failed to start: %v", err)
 	}
 }
