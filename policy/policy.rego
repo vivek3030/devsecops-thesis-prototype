@@ -1,185 +1,204 @@
 package main
 
-# Default = deny unless requirements met
+#
+# ===============================
+# DEFAULTS
+# ===============================
+#
+
 default allow = false
 
-#
-# ===============================
-# ALLOW RULE
-# ===============================
-#
-
+# If ANY deny rule fires → allow = false.
+# Allow only when allow_conditions is true AND no deny rules exist.
 allow {
-    slsa_level_3_compliant
-    no_critical_cve_vulnerabilities
-    no_high_cve_vulnerabilities
-    medium_cve_vulnerabilities_acceptable
-    no_critical_sast_issues
-    no_high_sast_issues
-    sbom_requirements_met
+    allow_conditions
+    not deny_exists
+}
+
+deny_exists {
+    deny[_]
 }
 
 #
 # ===============================
-# SLSA REQUIREMENTS
+# ALLOW CONDITIONS
 # ===============================
 #
+
+allow_conditions {
+    slsa_level_3_compliant
+    no_critical_cve
+    no_high_cve
+    medium_cve_acceptable
+    no_critical_sast
+    high_sast_acceptable
+    sbom_valid
+}
+
+#
+# ===============================
+# SAFE HELPERS
+# ===============================
+#
+
+# Safe getter — returns empty array if field missing.
+get_array(obj, field) = arr {
+    arr := obj[field]
+} else = [] { true }
+
+# Safe lowercase
+lower_safe(x) = y {
+    y := lower(x)
+} else = "" { true }
+
+#
+# ===============================
+# SLSA REQUIREMENTS (Null-safe)
+# ===============================
+#
+
+slsa := input.slsa_build
 
 slsa_level_3_compliant {
-    input.slsa_build.level == 3
-    input.slsa_build.provenance_verified == true
-    input.slsa_build.hermetic_build == true
-    input.slsa_build.builder_id != ""
+    slsa.level == 3
+    slsa.provenance_verified == true
+    slsa.hermetic_build == true
+    slsa.builder_id != ""
 }
 
 #
 # ===============================
-# CVE VULNERABILITY RULES
+# CVE VULNERABILITY HANDLING
 # ===============================
 #
 
-no_critical_cve_vulnerabilities {
-    count(critical_cve_vulnerabilities) == 0
+matches := get_array(input.vulnerabilities, "matches")
+
+critical_cve[v] {
+    v := matches[_]
+    lower_safe(v.vulnerability.severity) == "critical"
 }
 
-no_high_cve_vulnerabilities {
-    count(high_cve_vulnerabilities) == 0
+high_cve[v] {
+    v := matches[_]
+    lower_safe(v.vulnerability.severity) == "high"
 }
 
-medium_cve_vulnerabilities_acceptable {
-    count(medium_cve_vulnerabilities) <= 5
+medium_cve[v] {
+    v := matches[_]
+    lower_safe(v.vulnerability.severity) == "medium"
 }
 
-#
-# ===============================
-# SAST (Code Quality) RULES
-# ===============================
-#
-
-no_critical_sast_issues {
-    count(critical_sast_issues) == 0
+low_cve[v] {
+    v := matches[_]
+    lower_safe(v.vulnerability.severity) == "low"
 }
 
-no_high_sast_issues {
-    count(high_sast_issues) <= 3
+# ---- Policy Rules ----
+no_critical_cve {
+    count(critical_cve) == 0
 }
 
-#
-# ===============================
-# SBOM REQUIREMENTS
-# ===============================
-#
+no_high_cve {
+    count(high_cve) == 0
+}
 
-sbom_requirements_met {
-    input.sbom != null
-    input.sbom.components != null
-    count(input.sbom.components) > 0
-    input.sbom.metadata != null
+medium_cve_acceptable {
+    count(medium_cve) <= 5
 }
 
 #
 # ===============================
-# CVE Vulnerability Collections
+# SAST (Null-safe)
 # ===============================
 #
 
-critical_cve_vulnerabilities[v] {
-    some i
-    match := input.vulnerabilities.matches[i]
-    lower(match.vulnerability.severity) == "critical"
-    v := match
+sast := input.sast
+issues := get_array(sast, "Issues")
+
+critical_sast[i] {
+    issue := issues[_]
+    lower_safe(issue.severity) == "high"   # Gosec HIGH = Critical
+    i := issue
 }
 
-high_cve_vulnerabilities[v] {
-    some i
-    match := input.vulnerabilities.matches[i]
-    lower(match.vulnerability.severity) == "high"
-    v := match
+high_sast[i] {
+    issue := issues[_]
+    lower_safe(issue.severity) == "medium" # Gosec MEDIUM = High
+    i := issue
 }
 
-medium_cve_vulnerabilities[v] {
-    some i
-    match := input.vulnerabilities.matches[i]
-    lower(match.vulnerability.severity) == "medium"
-    v := match
+medium_sast[i] {
+    issue := issues[_]
+    lower_safe(issue.severity) == "low"
+    i := issue
 }
 
-low_cve_vulnerabilities[v] {
-    some i
-    match := input.vulnerabilities.matches[i]
-    lower(match.vulnerability.severity) == "low"
-    v := match
+no_critical_sast {
+    count(critical_sast) == 0
 }
 
-#
-# ===============================
-# SAST Issue Collections
-# ===============================
-#
-
-critical_sast_issues[issue] {
-    some i
-    sast_issue := input.sast.Issues[i]
-    sast_issue.severity == "HIGH"  # Gosec HIGH = Critical
-    issue := sast_issue
-}
-
-high_sast_issues[issue] {
-    some i
-    sast_issue := input.sast.Issues[i]
-    sast_issue.severity == "MEDIUM"  # Gosec MEDIUM = High
-    issue := sast_issue
-}
-
-medium_sast_issues[issue] {
-    some i
-    sast_issue := input.sast.Issues[i]
-    sast_issue.severity == "LOW"  # Gosec LOW = Medium
-    issue := sast_issue
+high_sast_acceptable {
+    count(high_sast) <= 3
 }
 
 #
 # ===============================
-# DENY MESSAGES
+# SBOM (Null-safe)
+# ===============================
+#
+
+sbom := input.sbom
+
+sbom_valid {
+    sbom != null
+    sbom.components != null
+    count(sbom.components) > 0
+    sbom.metadata != null
+}
+
+#
+# ===============================
+# DENY RULES (Fail reasons)
 # ===============================
 #
 
 deny[msg] {
-    count(critical_cve_vulnerabilities) > 0
-    ids := [c.vulnerability.id | c := critical_cve_vulnerabilities[_]]
-    msg := sprintf("❌ Critical CVE vulnerabilities found: %v", [ids])
+    count(critical_cve) > 0
+    ids := [c.vulnerability.id | c := critical_cve[_]]
+    msg := sprintf("❌ Critical CVEs found: %v", [ids])
 }
 
 deny[msg] {
-    count(high_cve_vulnerabilities) > 0
-    ids := [h.vulnerability.id | h := high_cve_vulnerabilities[_]]
-    msg := sprintf("❌ High CVE vulnerabilities found: %v", [ids])
+    count(high_cve) > 0
+    ids := [h.vulnerability.id | h := high_cve[_]]
+    msg := sprintf("❌ High severity CVEs found: %v", [ids])
 }
 
 deny[msg] {
-    count(medium_cve_vulnerabilities) > 5
-    msg := sprintf("⚠️ Too many medium CVE vulnerabilities: %d (max 5)", [count(medium_cve_vulnerabilities)])
+    count(medium_cve) > 5
+    msg := sprintf("⚠️ Too many medium CVEs: %d (max 5)", [count(medium_cve)])
 }
 
 deny[msg] {
-    count(critical_sast_issues) > 0
-    rules := [issue.rule_id | issue := critical_sast_issues[_]]
-    msg := sprintf("❌ Critical code security issues found: %v", [rules])
+    count(critical_sast) > 0
+    rules := [c.rule_id | c := critical_sast[_]]
+    msg := sprintf("❌ Critical SAST issues found: %v", [rules])
 }
 
 deny[msg] {
-    count(high_sast_issues) > 3
-    msg := sprintf("❌ Too many high severity code issues: %d (max 3)", [count(high_sast_issues)])
+    count(high_sast) > 3
+    msg := sprintf("❌ Too many high SAST issues: %d (max 3)", [count(high_sast)])
 }
 
 deny[msg] {
     not slsa_level_3_compliant
-    msg := "❌ SLSA L3 compliance requirements not met"
+    msg := "❌ SLSA L3 compliance not met"
 }
 
 deny[msg] {
-    not sbom_requirements_met
-    msg := "❌ SBOM does not meet minimum requirements"
+    not sbom_valid
+    msg := "❌ Invalid or incomplete SBOM"
 }
 
 #
@@ -189,25 +208,25 @@ deny[msg] {
 #
 
 warnings[msg] {
-    count(medium_cve_vulnerabilities) > 0
-    count(medium_cve_vulnerabilities) <= 5
-    msg := sprintf("⚠️ Medium CVE vulnerabilities present: %d (acceptable)", [count(medium_cve_vulnerabilities)])
+    count(medium_cve) > 0
+    count(medium_cve) <= 5
+    msg := sprintf("⚠️ Medium CVEs present: %d (acceptable)", [count(medium_cve)])
 }
 
 warnings[msg] {
-    count(low_cve_vulnerabilities) > 10
-    msg := sprintf("ℹ️ Many low CVE vulnerabilities: %d", [count(low_cve_vulnerabilities)])
+    count(low_cve) > 10
+    msg := sprintf("ℹ️ Many low CVEs: %d", [count(low_cve)])
 }
 
 warnings[msg] {
-    count(high_sast_issues) > 0
-    count(high_sast_issues) <= 3
-    msg := sprintf("⚠️ High severity code issues present: %d (acceptable)", [count(high_sast_issues)])
+    count(high_sast) > 0
+    count(high_sast) <= 3
+    msg := sprintf("⚠️ High severity SAST issues present: %d (acceptable)", [count(high_sast)])
 }
 
 warnings[msg] {
-    count(medium_sast_issues) > 5
-    msg := sprintf("ℹ️ Medium severity code issues: %d", [count(medium_sast_issues)])
+    count(medium_sast) > 5
+    msg := sprintf("ℹ️ Medium severity SAST issues: %d", [count(medium_sast)])
 }
 
 #
@@ -219,20 +238,20 @@ warnings[msg] {
 compliance_report = report {
     report := {
         "compliant": allow,
-        "cve_vulnerabilities": {
-            "critical": count(critical_cve_vulnerabilities),
-            "high": count(high_cve_vulnerabilities),
-            "medium": count(medium_cve_vulnerabilities),
-            "low": count(low_cve_vulnerabilities)
-        },
-        "sast_issues": {
-            "critical": count(critical_sast_issues),
-            "high": count(high_sast_issues),
-            "medium": count(medium_sast_issues)
-        },
         "violations": [d | d := deny[_]],
         "warnings": [w | w := warnings[_]],
-        "slsa_compliant": slsa_level_3_compliant,
-        "sbom_valid": sbom_requirements_met
+        "cve": {
+            "critical": count(critical_cve),
+            "high": count(high_cve),
+            "medium": count(medium_cve),
+            "low": count(low_cve),
+        },
+        "sast": {
+            "critical": count(critical_sast),
+            "high": count(high_sast),
+            "medium": count(medium_sast),
+        },
+        "slsa": slsa_level_3_compliant,
+        "sbom": sbom_valid,
     }
 }
