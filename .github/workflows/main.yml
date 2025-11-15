@@ -320,7 +320,7 @@ jobs:
             bom.json
             vulnerabilities.json
             input.json
-          retention-days: 90
+          retention-days: 30
 
   # ============================================
   # Stage 4: Comprehensive Metrics & Reporting
@@ -411,7 +411,7 @@ jobs:
         with:
           name: pipeline-metrics
           path: metrics/
-          retention-days: 365
+          retention-days: 90
 
       - name: "📊 Pipeline Summary"
         if: always()
