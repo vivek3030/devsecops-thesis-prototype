@@ -90,7 +90,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: "🏗️ Set up Docker Buildx"
+      - name: "🗝️ Set up Docker Buildx"
         uses: docker/setup-buildx-action@v3
 
       - name: "🐳 Build and Push Docker Image"
@@ -109,7 +109,7 @@ jobs:
             BUILD_DATE=${{ needs.prepare.outputs.build_start_time }}
             VCS_REF=${{ github.sha }}
 
-      - name: "📝 Get Image Digest"
+      - name: "🔍 Get Image Digest"
         id: image-ref
         run: |
           # The digest is in the metadata
@@ -118,17 +118,17 @@ jobs:
           
           echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
           echo "ref=${IMAGE_REF}" >> $GITHUB_OUTPUT
-          echo "🔐 Image Digest: ${DIGEST}"
-          echo "🔐 Image Ref: ${IMAGE_REF}"
+          echo "🔍 Image Digest: ${DIGEST}"
+          echo "🔍 Image Ref: ${IMAGE_REF}"
 
-      - name: "🔏 Install Cosign"
+      - name: "🔐 Install Cosign"
         uses: sigstore/cosign-installer@v3
 
-      - name: "✍️ Sign Container Image"
+      - name: "✏️ Sign Container Image"
         env:
           COSIGN_EXPERIMENTAL: 1
         run: |
-          echo "🔏 Signing image with keyless Cosign..."
+          echo "🔐 Signing image with keyless Cosign..."
           cosign sign --yes "${{ steps.image-ref.outputs.ref }}"
           echo "✅ Image signed successfully"
 
@@ -139,7 +139,7 @@ jobs:
           format: cyclonedx-json
           output-file: bom.json
 
-      - name: "📎 Attach SBOM Attestation"
+      - name: "🔎 Attach SBOM Attestation"
         env:
           COSIGN_EXPERIMENTAL: 1
         run: |
@@ -147,7 +147,7 @@ jobs:
           cosign attest --yes --type cyclonedx --predicate bom.json "${{ steps.image-ref.outputs.ref }}"
           echo "✅ SBOM attestation attached"
 
-      - name: "🔍 Verify Signature"
+      - name: "🔐 Verify Signature"
         env:
           COSIGN_EXPERIMENTAL: 1
         run: |
@@ -225,8 +225,12 @@ jobs:
 
       - name: "🔍 Scan for Vulnerabilities (Grype)"
         run: |
+          # Install Grype
           curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+          
+          # Scan the SBOM and save results
           grype sbom:bom.json -o json > vulnerabilities.json
+          
           echo "✅ Vulnerability scan complete"
 
       - name: "📉 Extract Vulnerability Statistics"
@@ -258,7 +262,7 @@ jobs:
           sudo mv /tmp/opa /usr/local/bin/opa
           opa version
 
-      - name: "📝 Create OPA Input"
+      - name: "🔍 Create OPA Input"
         run: |
           jq -n \
             --slurpfile grype vulnerabilities.json \
@@ -274,7 +278,7 @@ jobs:
               }
             }' > input.json
           
-          echo "📝 OPA Input created"
+          echo "🔍 OPA Input created"
 
       - name: "🔒 Run Policy Gate"
         id: opa_eval
@@ -288,7 +292,13 @@ jobs:
 
           # Get violation details
           VIOLATIONS_JSON=$(opa eval -i input.json -d ./policy 'data.main.deny' --format=json 2>/dev/null || echo '{"result":[{"expressions":[{"value":[]}]}]}')
-          VIOLATION_COUNT=$(echo "$VIOLATIONS_JSON" | jq -r '.result[0].expressions[0].value | length')
+          VIOLATION_COUNT=$(echo "$VIOLATIONS_JSON" | jq -r '.result[0].expressions[0].value | length' | tr -d '\n\r')
+          
+          # Ensure VIOLATION_COUNT is a valid integer
+          if ! [[ "$VIOLATION_COUNT" =~ ^[0-9]+$ ]]; then
+            VIOLATION_COUNT=0
+          fi
+          
           echo "violations=${VIOLATION_COUNT}" >> $GITHUB_OUTPUT
           
           echo "🛡️ Policy Evaluation Results:"
