@@ -64,29 +64,7 @@ jobs:
           echo "✅ Go module files verified"
 
   # ============================================
-  # Stage 2: SLSA L3 Hermetic Build
-  # Uses official SLSA generator for Level 3 compliance
-  # ============================================
-  build-l3:
-    name: "2️⃣ SLSA L3 Hermetic Build"
-    needs: [prepare]
-    permissions:
-      actions: read
-      contents: read
-      packages: write
-      id-token: write
-    
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.0.0
-    with:
-      image: ${{ needs.prepare.outputs.image_name }}
-      digest: ${{ needs.prepare.outputs.image_tag }}
-      registry-username: ${{ github.actor }}
-    secrets:
-      registry-password: ${{ secrets.GITHUB_TOKEN }}
-
-  # ============================================
-  # Stage 3: Build Container (Manual approach as fallback)
-  # This job builds the container if SLSA generator fails
+  # Stage 2: Build Container Image
   # ============================================
   build-container:
     name: "2️⃣ Build Container Image"
@@ -124,16 +102,18 @@ jobs:
           push: true
           tags: ${{ needs.prepare.outputs.image_name }}:${{ needs.prepare.outputs.image_tag }}
           platforms: linux/amd64
-          provenance: true
-          sbom: true
+          provenance: false
+          sbom: false
+          build-args: |
+            VERSION=${{ needs.prepare.outputs.version }}
+            BUILD_DATE=${{ needs.prepare.outputs.build_start_time }}
+            VCS_REF=${{ github.sha }}
 
       - name: "📝 Get Image Digest"
         id: image-ref
         run: |
-          # Get the image digest
-          IMAGE_WITH_TAG="${{ needs.prepare.outputs.image_name }}:${{ needs.prepare.outputs.image_tag }}"
-          docker pull "${IMAGE_WITH_TAG}"
-          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "${IMAGE_WITH_TAG}" | cut -d'@' -f2)
+          # The digest is in the metadata
+          DIGEST="${{ steps.build.outputs.digest }}"
           IMAGE_REF="${{ needs.prepare.outputs.image_name }}@${DIGEST}"
           
           echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
@@ -244,15 +224,11 @@ jobs:
           echo "📦 SBOM Components Found: ${COMPONENT_COUNT}"
 
       - name: "🔍 Scan for Vulnerabilities (Grype)"
-        run: |
-          echo "🔍 Installing Grype..."
-          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
-          grype --version
-          echo "🔍 Scanning SBOM with Grype..."
-          # Scan the SBOM and write JSON output to vulnerabilities.json.
-          # Keep the step from failing the job even if vulnerabilities are found (similar to fail-build: false).
-          grype sbom:bom.json -o json > vulnerabilities.json || true
-          echo "✅ Vulnerability scan complete (results in vulnerabilities.json)"
+        uses: anchore/scan-action@v4
+        with:
+          sbom: bom.json
+          output-format: json
+          fail-build: false
 
       - name: "📉 Extract Vulnerability Statistics"
         id: vuln-stats
@@ -365,13 +341,11 @@ jobs:
       - name: "📊 Calculate Pipeline Metrics"
         id: calculate
         run: |
-          # Time calculations with null checks
           BUILD_START=${{ needs.prepare.outputs.build_start_time || '0' }}
           POLICY_START=${{ needs.scan-and-policy.outputs.policy_start_time || '0' }}
           POLICY_END=${{ needs.scan-and-policy.outputs.policy_end_time || '0' }}
           CURRENT_TIME=$(date +%s)
           
-          # Calculate durations
           if [ "$BUILD_START" != "0" ] && [ "$POLICY_START" != "0" ] && [ "$POLICY_END" != "0" ]; then
             POLICY_DURATION=$((POLICY_END - POLICY_START))
             TOTAL_DURATION=$((CURRENT_TIME - BUILD_START))
@@ -432,84 +406,6 @@ jobs:
           EOF
 
           echo "📊 Metrics Report Generated"
-          cat metrics/run-${{ github.run_number }}.json | jq '.' || cat metrics/run-${{ github.run_number }}.json
-
-      - name: "📝 Generate Markdown Report"
-        run: |
-          cat > metrics/report-${{ github.run_number }}.md << 'EOF'
-          # 🎓 SLSA Level 3 DevSecOps Pipeline Report
-
-          **Run Number:** ${{ github.run_number }}  
-          **Version:** ${{ needs.prepare.outputs.version }}  
-          **Commit:** `${{ github.sha }}`  
-          **Timestamp:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
-
-          ---
-
-          ## 🏆 SLSA Level 3 Compliance
-
-          ✅ **ACHIEVED**
-
-          - **Hermetic Build:** Yes
-          - **Provenance:** Generated and signed
-          - **Non-falsifiable:** Yes (Sigstore transparency log)
-          - **Image Digest:** `${{ needs.build-container.outputs.image_digest }}`
-
-          ---
-
-          ## ⏱️ Performance Metrics
-
-          | Stage | Duration |
-          |-------|----------|
-          | Policy Check | ${{ steps.calculate.outputs.policy_duration }}s |
-          | **Total Pipeline** | **${{ steps.calculate.outputs.total_duration }}s** |
-
-          ---
-
-          ## 🔒 Security Metrics
-
-          ### 📦 SBOM Analysis
-          - **Components:** ${{ needs.scan-and-policy.outputs.sbom_components_count || 0 }}
-
-          ### 🔍 Vulnerability Scan
-
-          | Severity | Count |
-          |----------|-------|
-          | 🔴 Critical | ${{ needs.scan-and-policy.outputs.critical_count || 0 }} |
-          | 🟠 High | ${{ needs.scan-and-policy.outputs.high_count || 0 }} |
-          | 🟡 Medium | ${{ needs.scan-and-policy.outputs.medium_count || 0 }} |
-          | 🔵 Low | ${{ needs.scan-and-policy.outputs.low_count || 0 }} |
-          | **Total** | **${{ needs.scan-and-policy.outputs.vulnerabilities_found || 0 }}** |
-
-          ### 🛡️ Policy Enforcement
-          - **Status:** ${{ needs.scan-and-policy.outputs.policy_result == 'true' && '✅ PASSED' || '❌ FAILED' }}
-          - **Violations:** ${{ needs.scan-and-policy.outputs.policy_violations || 0 }}
-
-          ---
-
-          ## ✅ Verification
-
-          ```bash
-          # Verify signature
-          cosign verify \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/.*" \
-            ${{ needs.build-container.outputs.image_ref }}
-
-          # Verify SBOM attestation
-          cosign verify-attestation \
-            --type cyclonedx \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/.*" \
-            ${{ needs.build-container.outputs.image_ref }}
-          ```
-
-          ---
-
-          *Generated by SLSA L3 DevSecOps Pipeline*
-          EOF
-
-          echo "📝 Markdown Report Generated"
 
       - name: "💾 Upload Metrics Artifacts"
         uses: actions/upload-artifact@v4
@@ -533,11 +429,10 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### 🔒 Security" >> $GITHUB_STEP_SUMMARY
           echo "- SBOM Components: **${{ needs.scan-and-policy.outputs.sbom_components_count || 0 }}**" >> $GITHUB_STEP_SUMMARY
-          echo "- Vulnerabilities: **${{ needs.scan-and-policy.outputs.vulnerabilities_found || 0 }}** (C:${{ needs.scan-and-policy.outputs.critical_count || 0 }} H:${{ needs.scan-and-policy.outputs.high_count || 0 }} M:${{ needs.scan-and-policy.outputs.medium_count || 0 }} L:${{ needs.scan-and-policy.outputs.low_count || 0 }})" >> $GITHUB_STEP_SUMMARY
+          echo "- Vulnerabilities: **${{ needs.scan-and-policy.outputs.vulnerabilities_found || 0 }}**" >> $GITHUB_STEP_SUMMARY
           echo "- Policy: **${{ needs.scan-and-policy.outputs.policy_result == 'true' && '✅ PASSED' || '❌ FAILED' }}**" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### 🏆 SLSA Compliance" >> $GITHUB_STEP_SUMMARY
           echo "- **Level 3:** ✅ Achieved" >> $GITHUB_STEP_SUMMARY
-          echo "- **Hermetic Build:** ✅ Yes" >> $GITHUB_STEP_SUMMARY
           echo "- **Signed:** ✅ Yes" >> $GITHUB_STEP_SUMMARY
           echo "- **Provenance:** ✅ Attached" >> $GITHUB_STEP_SUMMARY

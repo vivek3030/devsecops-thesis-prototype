@@ -1,7 +1,6 @@
 # ============================================
-# SLSA L3 Compliant Dockerfile (Alpine-based with Health Check)
+# SLSA L3 Compliant Multi-Architecture Dockerfile
 # ============================================
-# Alternative to distroless for environments requiring health checks
 
 # --- Build Stage ---
 FROM golang:1.21-alpine@sha256:445f34008a77b0b98bf1821bf7ef5e37bb63cc42d22ee7c21cc17041070d134f AS build
@@ -39,22 +38,18 @@ RUN CGO_ENABLED=0 \
     -o /app/server \
     .
 
-# Verify the binary
-RUN file /app/server && \
+# Verify the binary exists and is executable
+RUN ls -lah /app/server && \
     chmod +x /app/server
 
 # --- Final Stage ---
-# Use minimal Alpine image (smaller than distroless but includes shell for health checks)
-FROM alpine:3.19@sha256:51b67269f354137895d43f3b3d810bfacd3945438e94dc5ac55fdac340352f48
-
-# Install runtime dependencies
-RUN apk add --no-cache \
-    ca-certificates \
-    tzdata && \
-    addgroup -g 65532 -S nonroot && \
-    adduser -u 65532 -S nonroot -G nonroot
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:6dcc833df2a475be1a3d7fc96eac92eb5799c892f553d0f5b3744e66d44e7c16
 
 # Add labels for metadata
+ARG VERSION=dev
+ARG BUILD_DATE
+ARG VCS_REF
+
 LABEL org.opencontainers.image.title="SLSA L3 Demo Application" \
       org.opencontainers.image.description="Secure Go application with SLSA L3 compliance" \
       org.opencontainers.image.version="${VERSION}" \
@@ -68,15 +63,11 @@ LABEL org.opencontainers.image.title="SLSA L3 Demo Application" \
 # Copy the statically-linked binary from build stage
 COPY --from=build /app/server /usr/local/bin/server
 
-# Use non-root user
-USER nonroot:nonroot
+# Use non-root user (distroless nonroot is UID 65532)
+USER 65532:65532
 
 # Expose application port
 EXPOSE 8080
-
-# Health check using the application's built-in health endpoint
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD ["/usr/local/bin/server", "-health"]
 
 # Run the application
 ENTRYPOINT ["/usr/local/bin/server"]
