@@ -218,13 +218,14 @@ jobs:
         run: |
           echo "📊 Analyzing SBOM..."
           if [ -f bom.json ] && [ -s bom.json ]; then
+            # Use a more efficient way to count components without loading entire file
             COMPONENT_COUNT=$(jq '.components | length' bom.json)
             echo "count=${COMPONENT_COUNT}" >> $GITHUB_OUTPUT
             echo "📦 SBOM Components Found: ${COMPONENT_COUNT}"
             
-            # Display some component details
-            echo "📋 Component Breakdown:"
-            jq -r '.components[] | "\(.name) - \(.version // "N/A")"' bom.json | head -10
+            # Display limited component details to avoid pipe issues
+            echo "📋 Sample Components:"
+            jq -r '.components[0:5][] | "\(.name) - \(.version // "N/A")"' bom.json 2>/dev/null || echo "  (unable to display details)"
           else
             echo "count=0" >> $GITHUB_OUTPUT
             echo "⚠️ No SBOM generated or empty file"
@@ -284,12 +285,12 @@ jobs:
           # Show sample vulnerabilities if any exist
           if [ "$CRITICAL" -gt 0 ]; then
             echo "⚠️ CRITICAL CVEs Detected:"
-            jq -r '.matches[] | select(.vulnerability.severity == "Critical") | "  - \(.vulnerability.id): \(.artifact.name)"' vulnerabilities.json | head -5
+            jq -r '.matches[] | select(.vulnerability.severity == "Critical") | "  - \(.vulnerability.id): \(.artifact.name)"' vulnerabilities.json | head -3
           fi
           
           if [ "$HIGH" -gt 0 ]; then
             echo "⚠️ HIGH CVEs Detected:"
-            jq -r '.matches[] | select(.vulnerability.severity == "High") | "  - \(.vulnerability.id): \(.artifact.name)"' vulnerabilities.json | head -5
+            jq -r '.matches[] | select(.vulnerability.severity == "High") | "  - \(.vulnerability.id): \(.artifact.name)"' vulnerabilities.json | head -3
           fi
 
       - name: "🔬 Static Application Security Testing (SAST) - Gosec"
@@ -348,7 +349,7 @@ jobs:
           # Show detailed issues
           if [ "$TOTAL" -gt 0 ]; then
             echo "🔍 Code Security Issues Found:"
-            jq -r '.Issues[] | "  ⚠️ [\(.severity)] \(.rule_id): \(.details) (Line: \(.line))"' gosec-report.json | head -10
+            jq -r '.Issues[] | "  ⚠️ [\(.severity)] \(.rule_id): \(.details) (Line: \(.line))"' gosec-report.json | head -5
             echo ""
           fi
 
@@ -369,37 +370,18 @@ jobs:
         run: |
           echo "📊 Creating combined vulnerability report..."
           
-          # Read files safely
-          if [ ! -f vulnerabilities.json ] || [ ! -s vulnerabilities.json ]; then
-            VULN_DATA='{"matches":[]}'
-          else
-            VULN_DATA=$(cat vulnerabilities.json)
-          fi
-          
-          if [ ! -f gosec-report.json ] || [ ! -s gosec-report.json ]; then
-            SAST_DATA='{"Issues":[]}'
-          else
-            SAST_DATA=$(cat gosec-report.json)
-          fi
-          
-          if [ ! -f trivy-report.json ] || [ ! -s trivy-report.json ]; then
-            TRIVY_DATA='{"Results":[]}'
-          else
-            TRIVY_DATA=$(cat trivy-report.json)
-          fi
-          
-          # Create a combined summary
+          # Use jq to read files directly instead of loading into memory
           jq -n \
-            --argjson vuln "$VULN_DATA" \
-            --argjson sast "$SAST_DATA" \
-            --argjson trivy "$TRIVY_DATA" \
+            --argfile vuln vulnerabilities.json \
+            --argfile sast gosec-report.json \
+            --argfile trivy trivy-report.json \
             '{
               "cve_scan": {
                 "tool": "Grype",
                 "results": $vuln
               },
               "sast_scan": {
-                "tool": "Gosec",
+                "tool": "Gosec", 
                 "results": $sast
               },
               "container_scan": {
@@ -457,12 +439,8 @@ jobs:
         run: |
           echo "=== Debug: Checking input files ==="
           ls -la *.json 2>/dev/null || echo "No JSON files found"
-          echo "=== bom.json sample ==="
-          head -2 bom.json 2>/dev/null || echo "bom.json not found"
-          echo "=== vulnerabilities.json sample ==="
-          head -2 vulnerabilities.json 2>/dev/null || echo "vulnerabilities.json not found"
-          echo "=== gosec-report.json sample ==="
-          head -2 gosec-report.json 2>/dev/null || echo "gosec-report.json not found"
+          echo "=== File sizes ==="
+          wc -c *.json 2>/dev/null | head -10 || echo "No files to measure"
 
       - name: "🛡️ Install OPA (Open Policy Agent)"
         run: |
@@ -483,33 +461,11 @@ jobs:
           [ -f bom.json ] || echo "⚠️ bom.json not found"
           [ -f gosec-report.json ] || echo "⚠️ gosec-report.json not found"
           
-          # Read files safely with defaults
-          if [ -f vulnerabilities.json ] && [ -s vulnerabilities.json ]; then
-              GRYPE_DATA=$(cat vulnerabilities.json)
-          else
-              GRYPE_DATA='{"matches":[]}'
-              echo "⚠️ Using empty vulnerabilities data"
-          fi
-          
-          if [ -f bom.json ] && [ -s bom.json ]; then
-              SYFT_DATA=$(cat bom.json)
-          else
-              SYFT_DATA='{"components":[]}'
-              echo "⚠️ Using empty SBOM data"
-          fi
-          
-          if [ -f gosec-report.json ] && [ -s gosec-report.json ]; then
-              GOSEC_DATA=$(cat gosec-report.json)
-          else
-              GOSEC_DATA='{"Issues":[]}'
-              echo "⚠️ Using empty SAST data"
-          fi
-          
-          # Create input.json with proper error handling
+          # Use jq with --argfile to read files directly (avoids argument limits)
           jq -n \
-            --argjson grype "$GRYPE_DATA" \
-            --argjson syft "$SYFT_DATA" \
-            --argjson gosec "$GOSEC_DATA" \
+            --argfile grype vulnerabilities.json \
+            --argfile syft bom.json \
+            --argfile gosec gosec-report.json \
             '{
               "vulnerabilities": $grype,
               "sbom": $syft,
@@ -664,7 +620,7 @@ jobs:
           # Display violations if any
           if [ "$VIOLATION_COUNT" -gt 0 ]; then
             echo "❌ POLICY VIOLATIONS DETECTED:"
-            echo "$VIOLATIONS_RESULT" | jq -r '.result[0].expressions[0].value[]?' 2>/dev/null | while read -r violation; do
+            echo "$VIOLATIONS_RESULT" | jq -r '.result[0].expressions[0].value[]?' 2>/dev/null | head -5 | while read -r violation; do
               if [ -n "$violation" ]; then
                 echo "   ❌ $violation"
               fi
@@ -675,7 +631,7 @@ jobs:
           # Display warnings if any
           if [ "$WARNING_COUNT" -gt 0 ]; then
             echo "⚠️ POLICY WARNINGS:"
-            echo "$WARNINGS_RESULT" | jq -r '.result[0].expressions[0].value[]?' 2>/dev/null | while read -r warning; do
+            echo "$WARNINGS_RESULT" | jq -r '.result[0].expressions[0].value[]?' 2>/dev/null | head -5 | while read -r warning; do
               if [ -n "$warning" ]; then
                 echo "   ⚠️ $warning"
               fi
