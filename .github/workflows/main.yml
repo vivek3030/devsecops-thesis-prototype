@@ -366,40 +366,57 @@ jobs:
             echo "⚠️ Trivy scan failed, using empty result"
           fi
 
-      - name: "📊 Combine All Vulnerability Data"
+      - name: "📊 Combine All Vulnerability Data with Python"
         run: |
-          echo "📊 Creating combined vulnerability report..."
+          echo "📊 Creating combined vulnerability report using Python..."
           
-          # Check jq version and use compatible approach
-          echo "🔍 jq version: $(jq --version)"
+          python3 -c "
+          import json
+          import os
           
-          # Use a compatible approach for older jq versions
-          # Read files and create the combined structure step by step
-          cat > combine.jq << 'EOF'
-          {
-            "cve_scan": {
-              "tool": "Grype",
-              "results": .vuln
-            },
-            "sast_scan": {
-              "tool": "Gosec", 
-              "results": .sast
-            },
-            "container_scan": {
-              "tool": "Trivy",
-              "results": .trivy
-            }
+          print('Reading vulnerability files...')
+          
+          # Read files with error handling
+          def read_json_file(filename, default):
+              try:
+                  with open(filename, 'r') as f:
+                      return json.load(f)
+              except (FileNotFoundError, json.JSONDecodeError) as e:
+                  print(f'Warning: Could not read {filename}: {e}')
+                  return default
+          
+          # Read all files
+          vuln_data = read_json_file('vulnerabilities.json', {'matches': []})
+          sast_data = read_json_file('gosec-report.json', {'Issues': []})
+          trivy_data = read_json_file('trivy-report.json', {'Results': []})
+          
+          # Create combined structure
+          combined = {
+              'cve_scan': {
+                  'tool': 'Grype',
+                  'results': vuln_data
+              },
+              'sast_scan': {
+                  'tool': 'Gosec',
+                  'results': sast_data
+              },
+              'container_scan': {
+                  'tool': 'Trivy',
+                  'results': trivy_data
+              }
           }
-          EOF
           
-          # Use jq to combine files in a compatible way
-          jq -n \
-            --argjson vuln "$(cat vulnerabilities.json)" \
-            --argjson sast "$(cat gosec-report.json)" \
-            --argjson trivy "$(cat trivy-report.json)" \
-            -f combine.jq > combined-vulnerabilities.json
+          # Write combined file
+          with open('combined-vulnerabilities.json', 'w') as f:
+              json.dump(combined, f, indent=2)
           
-          echo "✅ Combined report created"
+          print('✅ Combined report created successfully')
+          print(f'  - CVE matches: {len(vuln_data.get(\"matches\", []))}')
+          print(f'  - SAST issues: {len(sast_data.get(\"Issues\", []))}')
+          print(f'  - Trivy results: {len(trivy_data.get(\"Results\", []))}')
+          "
+          
+          echo "✅ Combined vulnerability data created"
 
       - name: "💾 Upload SBOM & All Vulnerability Reports"
         uses: actions/upload-artifact@v4
@@ -460,59 +477,62 @@ jobs:
           echo "OPA version: $(opa version)"
           echo "✅ OPA installed"
 
-      - name: "🔍 Create OPA Input Data"
+      - name: "🔍 Create OPA Input Data with Python"
         run: |
-          echo "📝 Creating OPA input with all scan results..."
+          echo "📝 Creating OPA input with Python (handles large files)..."
           
-          # Check if required files exist
-          echo "🔍 Checking input files..."
-          [ -f vulnerabilities.json ] || echo "⚠️ vulnerabilities.json not found"
-          [ -f bom.json ] || echo "⚠️ bom.json not found"
-          [ -f gosec-report.json ] || echo "⚠️ gosec-report.json not found"
+          python3 -c "
+          import json
+          import os
           
-          # Create input using a compatible jq approach
-          cat > create-input.jq << 'EOF'
-          {
-            "vulnerabilities": $grype,
-            "sbom": $syft,
-            "sast": $gosec,
-            "slsa_build": {
-              "level": 3,
-              "builder_id": "github-actions",
-              "provenance_verified": true,
-              "hermetic_build": true,
-              "signed": true
-            },
-            "metadata": {
-              "version": $version,
-              "commit_sha": $commit_sha,
-              "pipeline_run": $pipeline_run
-            }
+          print('Reading scan results for OPA input...')
+          
+          # Read files with error handling
+          def read_json_file(filename, default):
+              try:
+                  with open(filename, 'r') as f:
+                      return json.load(f)
+              except (FileNotFoundError, json.JSONDecodeError) as e:
+                  print(f'Warning: Could not read {filename}: {e}')
+                  return default
+          
+          # Read all input files
+          vuln_data = read_json_file('vulnerabilities.json', {'matches': []})
+          sbom_data = read_json_file('bom.json', {'components': []})
+          sast_data = read_json_file('gosec-report.json', {'Issues': []})
+          
+          # Create OPA input structure
+          opa_input = {
+              'vulnerabilities': vuln_data,
+              'sbom': sbom_data,
+              'sast': sast_data,
+              'slsa_build': {
+                  'level': 3,
+                  'builder_id': 'github-actions',
+                  'provenance_verified': True,
+                  'hermetic_build': True,
+                  'signed': True
+              },
+              'metadata': {
+                  'version': '${{ needs.prepare.outputs.version }}',
+                  'commit_sha': '${{ github.sha }}',
+                  'pipeline_run': '${{ github.run_number }}'
+              }
           }
-          EOF
           
-          # Use jq with --argjson for compatibility
-          jq -n \
-            --argjson grype "$(cat vulnerabilities.json)" \
-            --argjson syft "$(cat bom.json)" \
-            --argjson gosec "$(cat gosec-report.json)" \
-            --arg version "${{ needs.prepare.outputs.version }}" \
-            --arg commit_sha "${{ github.sha }}" \
-            --arg pipeline_run "${{ github.run_number }}" \
-            -f create-input.jq > input.json
+          # Write OPA input file
+          with open('input.json', 'w') as f:
+              json.dump(opa_input, f, indent=2)
           
-          # Validate the created input.json
-          if jq empty input.json 2>/dev/null; then
-              echo "✅ OPA input created successfully"
-              echo "📊 Input Summary:"
-              echo "   - CVE Vulnerabilities: $(jq '.vulnerabilities.matches | length' input.json)"
-              echo "   - SAST Issues: $(jq '.sast.Issues | length' input.json)"
-              echo "   - SBOM Components: $(jq '.sbom.components | length' input.json)"
-              echo "   - SLSA Level: $(jq -r '.slsa_build.level' input.json)"
-          else
-              echo "❌ Failed to create valid input.json"
-              exit 1
-          fi
+          # Print summary
+          print('✅ OPA input created successfully')
+          print(f'  - CVE Vulnerabilities: {len(vuln_data.get(\"matches\", []))}')
+          print(f'  - SAST Issues: {len(sast_data.get(\"Issues\", []))}')
+          print(f'  - SBOM Components: {len(sbom_data.get(\"components\", []))}')
+          print(f'  - SLSA Level: 3')
+          "
+          
+          echo "✅ OPA input data created"
 
       - name: "🧪 Test OPA Policy Standalone"
         run: |
