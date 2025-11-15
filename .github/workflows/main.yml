@@ -370,25 +370,34 @@ jobs:
         run: |
           echo "📊 Creating combined vulnerability report..."
           
-          # Use jq to read files directly instead of loading into memory
+          # Check jq version and use compatible approach
+          echo "🔍 jq version: $(jq --version)"
+          
+          # Use a compatible approach for older jq versions
+          # Read files and create the combined structure step by step
+          cat > combine.jq << 'EOF'
+          {
+            "cve_scan": {
+              "tool": "Grype",
+              "results": .vuln
+            },
+            "sast_scan": {
+              "tool": "Gosec", 
+              "results": .sast
+            },
+            "container_scan": {
+              "tool": "Trivy",
+              "results": .trivy
+            }
+          }
+          EOF
+          
+          # Use jq to combine files in a compatible way
           jq -n \
-            --argfile vuln vulnerabilities.json \
-            --argfile sast gosec-report.json \
-            --argfile trivy trivy-report.json \
-            '{
-              "cve_scan": {
-                "tool": "Grype",
-                "results": $vuln
-              },
-              "sast_scan": {
-                "tool": "Gosec", 
-                "results": $sast
-              },
-              "container_scan": {
-                "tool": "Trivy",
-                "results": $trivy
-              }
-            }' > combined-vulnerabilities.json
+            --argjson vuln "$(cat vulnerabilities.json)" \
+            --argjson sast "$(cat gosec-report.json)" \
+            --argjson trivy "$(cat trivy-report.json)" \
+            -f combine.jq > combined-vulnerabilities.json
           
           echo "✅ Combined report created"
 
@@ -461,28 +470,36 @@ jobs:
           [ -f bom.json ] || echo "⚠️ bom.json not found"
           [ -f gosec-report.json ] || echo "⚠️ gosec-report.json not found"
           
-          # Use jq with --argfile to read files directly (avoids argument limits)
+          # Create input using a compatible jq approach
+          cat > create-input.jq << 'EOF'
+          {
+            "vulnerabilities": $grype,
+            "sbom": $syft,
+            "sast": $gosec,
+            "slsa_build": {
+              "level": 3,
+              "builder_id": "github-actions",
+              "provenance_verified": true,
+              "hermetic_build": true,
+              "signed": true
+            },
+            "metadata": {
+              "version": $version,
+              "commit_sha": $commit_sha,
+              "pipeline_run": $pipeline_run
+            }
+          }
+          EOF
+          
+          # Use jq with --argjson for compatibility
           jq -n \
-            --argfile grype vulnerabilities.json \
-            --argfile syft bom.json \
-            --argfile gosec gosec-report.json \
-            '{
-              "vulnerabilities": $grype,
-              "sbom": $syft,
-              "sast": $gosec,
-              "slsa_build": {
-                "level": 3,
-                "builder_id": "github-actions",
-                "provenance_verified": true,
-                "hermetic_build": true,
-                "signed": true
-              },
-              "metadata": {
-                "version": "'"${{ needs.prepare.outputs.version }}"'",
-                "commit_sha": "'"${{ github.sha }}"'",
-                "pipeline_run": "'"${{ github.run_number }}"'"
-              }
-            }' > input.json
+            --argjson grype "$(cat vulnerabilities.json)" \
+            --argjson syft "$(cat bom.json)" \
+            --argjson gosec "$(cat gosec-report.json)" \
+            --arg version "${{ needs.prepare.outputs.version }}" \
+            --arg commit_sha "${{ github.sha }}" \
+            --arg pipeline_run "${{ github.run_number }}" \
+            -f create-input.jq > input.json
           
           # Validate the created input.json
           if jq empty input.json 2>/dev/null; then
