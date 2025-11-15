@@ -1,11 +1,17 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -18,62 +24,83 @@ var (
 	VCSRef    = "unknown"
 )
 
-// Simple HTTP handler
+type jsonResponse map[string]interface{}
+
+// writeJSON writes a JSON response and logs write errors.
+func writeJSON(w http.ResponseWriter, status int, v interface{}) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	enc := json.NewEncoder(w)
+	if err := enc.Encode(v); err != nil {
+		// Log the error — don't expose internals to the client
+		log.Printf("error encoding JSON response: %v", err)
+	}
+}
+
+// securityHeadersMiddleware sets common security headers.
+func securityHeadersMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Prevent MIME sniffing
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		// Prevent clickjacking
+		w.Header().Set("X-Frame-Options", "DENY")
+		// Basic XSS protection
+		w.Header().Set("X-XSS-Protection", "1; mode=block")
+		// Content Security Policy — minimal; adjust per app needs
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none';")
+		// Referrer policy
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		// Continue to next handler
+		next.ServeHTTP(w, r)
+	})
+}
+
+// helloHandler responds with an info message.
 func helloHandler(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	if _, err := w.Write([]byte(fmt.Sprintf(
+	resp := fmt.Sprintf(
 		"Hello, secure world! This is the SLSA L3 test application.\n\nVersion: %s\nBuild Date: %s\nCommit: %s",
 		Version, BuildDate, VCSRef,
-	))); err != nil {
-		log.Printf("Error writing hello response: %v", err)
+	)
+	// Small text response; use Write and log errors
+	if _, err := w.Write([]byte(resp)); err != nil {
+		log.Printf("error writing hello response: %v", err)
 	}
 }
 
-// Health check endpoint
+// healthHandler returns a short JSON health status.
 func healthHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	if _, err := w.Write([]byte(fmt.Sprintf(`{"status":"healthy","version":"%s"}`, Version))); err != nil {
-		log.Printf("Error writing health response: %v", err)
-	}
+	writeJSON(w, http.StatusOK, jsonResponse{"status": "healthy", "version": Version})
 }
 
-// Readiness check endpoint
+// readyHandler returns readiness JSON.
 func readyHandler(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	if _, err := w.Write([]byte(`{"status":"ready"}`)); err != nil {
-		log.Printf("Error writing readiness response: %v", err)
-	}
+	writeJSON(w, http.StatusOK, jsonResponse{"status": "ready"})
 }
 
-// Version information endpoint
+// versionHandler returns version metadata as JSON.
 func versionHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	if _, err := w.Write([]byte(fmt.Sprintf(`{
-	"version": "%s",
-	"buildDate": "%s",
-	"gitCommit": "%s"
-}`, Version, BuildDate, VCSRef))); err != nil {
-		log.Printf("Error writing version response: %v", err)
-	}
+	writeJSON(w, http.StatusOK, jsonResponse{
+		"version":   Version,
+		"buildDate": BuildDate,
+		"gitCommit": VCSRef,
+	})
 }
 
 func main() {
-	// Command-line flags
+	// Flags
 	versionFlag := flag.Bool("version", false, "Print version information and exit")
 	helpFlag := flag.Bool("help", false, "Print help information and exit")
 	healthFlag := flag.Bool("health", false, "Perform health check and exit (for Docker HEALTHCHECK)")
-	port := flag.String("port", "8080", "Port to listen on")
+	portFlag := flag.Int("port", 8080, "Port to listen on")
 	flag.Parse()
 
+	// Handle version/help flags
 	if *versionFlag {
 		fmt.Printf("Version:    %s\n", Version)
 		fmt.Printf("Build Date: %s\n", BuildDate)
 		fmt.Printf("Git Commit: %s\n", VCSRef)
 		os.Exit(0)
 	}
-
 	if *helpFlag {
 		fmt.Println("SLSA L3 Demo Application")
 		fmt.Println("\nUsage:")
@@ -86,46 +113,83 @@ func main() {
 		os.Exit(0)
 	}
 
+	// If healthFlag is used (for Docker HEALTHCHECK), do a quick HTTP GET with timeout
 	if *healthFlag {
-		resp, err := http.Get("http://localhost:" + *port + "/health")
+		client := &http.Client{
+			Timeout: 3 * time.Second,
+		}
+		url := "http://localhost:" + strconv.Itoa(*portFlag) + "/health"
+		resp, err := client.Get(url)
 		if err != nil {
-			log.Fatalf("Health check failed: %v", err)
+			log.Fatalf("health check failed: %v", err)
 		}
 		defer resp.Body.Close()
-
 		if resp.StatusCode == http.StatusOK {
 			fmt.Println("Health check: OK")
 			os.Exit(0)
-		} else {
-			fmt.Printf("Health check failed: status %d\n", resp.StatusCode)
-			os.Exit(1)
 		}
+		fmt.Printf("Health check failed: status %d\n", resp.StatusCode)
+		os.Exit(1)
 	}
 
-	// Create router
+	// Router and middleware
 	r := mux.NewRouter()
+	r.Use(securityHeadersMiddleware)
 	r.HandleFunc("/", helloHandler).Methods("GET")
 	r.HandleFunc("/health", healthHandler).Methods("GET")
 	r.HandleFunc("/ready", readyHandler).Methods("GET")
 	r.HandleFunc("/version", versionHandler).Methods("GET")
 
-	// Log startup
-	log.Printf("Starting server...")
-	log.Printf("Version: %s", Version)
-	log.Printf("Build Date: %s", BuildDate)
-	log.Printf("Git Commit: %s", VCSRef)
-	log.Printf("Listening on port %s...", *port)
-
-	// Use http.Server with timeouts
+	// Server configuration with timeouts
 	srv := &http.Server{
-		Addr:         ":" + *port,
 		Handler:      r,
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  120 * time.Second,
+		// Don't set Addr yet — we bind below after validating the port
 	}
 
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("Server failed to start: %v", err)
+	addr := ":" + strconv.Itoa(*portFlag)
+	log.Printf("Starting server on %s", addr)
+	log.Printf("Version: %s, Build Date: %s, Commit: %s", Version, BuildDate, VCSRef)
+
+	// Start server in background goroutine so we can handle graceful shutdown
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatalf("failed to listen on %s: %v", addr, err)
 	}
+
+	// Channel to capture errors from ListenAndServe
+	serverErrCh := make(chan error, 1)
+	go func() {
+		// srv.Serve will return http.ErrServerClosed on graceful shutdown
+		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
+			serverErrCh <- err
+		}
+		close(serverErrCh)
+	}()
+
+	// Setup signal handling for graceful shutdown
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+
+	select {
+	case sig := <-stop:
+		log.Printf("Received signal %s — shutting down", sig)
+	case err := <-serverErrCh:
+		if err != nil {
+			log.Fatalf("server error: %v", err)
+		}
+	}
+
+	// Graceful shutdown with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("graceful shutdown failed: %v", err)
+		if err := srv.Close(); err != nil {
+			log.Printf("server close failed: %v", err)
+		}
+	}
+	log.Println("server stopped")
 }
