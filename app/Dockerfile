@@ -42,7 +42,7 @@ RUN ls -lah /app/server && chmod +x /app/server
 
 
 # --- Final Stage (Chainguard Static Base) ---
-FROM cgr.dev/chainguard/static@sha256:7cdbdd4302bb3ea9fe9263012c5dca4bb143769939f2d4e77a6bc87105bcf46f
+FROM cgr.dev/chainguard/static@sha256:8c5b1343e84c9f8a9e1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3
 
 # Metadata labels (same as your original)
 ARG VERSION=dev
