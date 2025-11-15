@@ -1,55 +1,119 @@
 package main
 
 import (
+	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"runtime"
 
-	// Import an external dependency for SBOM demonstration
 	"github.com/gorilla/mux"
 )
 
-// A simple HTTP handler that provides system information
+// Build-time variables (injected via -ldflags)
+var (
+	Version   = "dev"
+	BuildDate = "unknown"
+	VCSRef    = "unknown"
+)
+
+// Simple HTTP handler
 func helloHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
-	buildInfo := getBuildInfo()
-	w.Write([]byte("Hello, secure world! This is the SLSA L3 test application.\n\n" + buildInfo))
+	w.Write([]byte(fmt.Sprintf(
+		"Hello, secure world! This is the SLSA L3 test application.\n\nVersion: %s\nBuild Date: %s\nCommit: %s",
+		Version, BuildDate, VCSRef,
+	)))
 }
 
 // Health check endpoint
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("{\"status\":\"healthy\",\"slsa_level\":3}"))
+	w.Write([]byte(`{"status":"healthy","version":"` + Version + `"}`))
 }
 
-// Get build information
-func getBuildInfo() string {
-	version := os.Getenv("VERSION")
-	if version == "" {
-		version = "dev"
-	}
-	return "Version: " + version + "\n" +
-		"Architecture: " + runtime.GOARCH + "\n" +
-		"OS: " + runtime.GOOS + "\n" +
-		"Go Version: " + runtime.Version()
+// Readiness check endpoint
+func readyHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"ready"}`))
+}
+
+// Version information endpoint
+func versionHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, `{
+		"version": "%s",
+		"buildDate": "%s",
+		"gitCommit": "%s"
+	}`, Version, BuildDate, VCSRef)
 }
 
 func main() {
-	// Create a new router
-	r := mux.NewRouter()
+	// Command-line flags
+	versionFlag := flag.Bool("version", false, "Print version information and exit")
+	helpFlag := flag.Bool("help", false, "Print help information and exit")
+	healthFlag := flag.Bool("health", false, "Perform health check and exit (for Docker HEALTHCHECK)")
+	port := flag.String("port", "8080", "Port to listen on")
+	
+	flag.Parse()
 
-	// Register handlers
-	r.HandleFunc("/", helloHandler)
-	r.HandleFunc("/health", healthHandler)
-
-	// Start the server
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
+	// Handle version flag
+	if *versionFlag {
+		fmt.Printf("Version:    %s\n", Version)
+		fmt.Printf("Build Date: %s\n", BuildDate)
+		fmt.Printf("Git Commit: %s\n", VCSRef)
+		os.Exit(0)
 	}
 
-	log.Printf("SLSA L3 Secure Server starting on port %s...", port)
-	log.Printf("Architecture: %s, OS: %s", runtime.GOARCH, runtime.GOOS)
-	log.Fatal(http.ListenAndServe(":"+port, r))
+	// Handle help flag
+	if *helpFlag {
+		fmt.Println("SLSA L3 Demo Application")
+		fmt.Println("\nUsage:")
+		flag.PrintDefaults()
+		fmt.Println("\nEndpoints:")
+		fmt.Println("  GET /           - Hello world message")
+		fmt.Println("  GET /health     - Health check endpoint")
+		fmt.Println("  GET /ready      - Readiness check endpoint")
+		fmt.Println("  GET /version    - Version information")
+		os.Exit(0)
+	}
+
+	// Handle health check flag (for Docker HEALTHCHECK)
+	if *healthFlag {
+		resp, err := http.Get("http://localhost:" + *port + "/health")
+		if err != nil {
+			log.Fatalf("Health check failed: %v", err)
+		}
+		defer resp.Body.Close()
+		
+		if resp.StatusCode == http.StatusOK {
+			fmt.Println("Health check: OK")
+			os.Exit(0)
+		} else {
+			fmt.Printf("Health check failed: status %d\n", resp.StatusCode)
+			os.Exit(1)
+		}
+	}
+
+	// Create router
+	r := mux.NewRouter()
+	
+	// Register routes
+	r.HandleFunc("/", helloHandler).Methods("GET")
+	r.HandleFunc("/health", healthHandler).Methods("GET")
+	r.HandleFunc("/ready", readyHandler).Methods("GET")
+	r.HandleFunc("/version", versionHandler).Methods("GET")
+
+	// Log startup
+	log.Printf("Starting server...")
+	log.Printf("Version: %s", Version)
+	log.Printf("Build Date: %s", BuildDate)
+	log.Printf("Git Commit: %s", VCSRef)
+	log.Printf("Listening on port %s...", *port)
+
+	// Start server
+	if err := http.ListenAndServe(":"+*port, r); err != nil {
+		log.Fatalf("Server failed to start: %v", err)
+	}
 }

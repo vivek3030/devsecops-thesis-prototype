@@ -1,24 +1,22 @@
 # ============================================
-# SLSA L3 Compliant Multi-Architecture Dockerfile
+# SLSA L3 Compliant Dockerfile (Alpine-based with Health Check)
 # ============================================
-# This Dockerfile supports hermetic, reproducible builds
-# for both amd64 and arm64 architectures
+# Alternative to distroless for environments requiring health checks
 
 # --- Build Stage ---
-# Use specific Go version with digest for reproducibility
-FROM golang:1.21-alpine@sha256:926f7f7f4d3c72d028f85cf7d91da5c5f8c5c7d0f5f8f8d8c3a6f5d8f5d8f5d8 AS build
-
-# Install build dependencies with locked versions
-RUN apk add --no-cache \
-    ca-certificates=20230506-r0 \
-    git=2.40.1-r0
+FROM golang:1.21-alpine@sha256:445f34008a77b0b98bf1821bf7ef5e37bb63cc42d22ee7c21cc17041070d134f AS build
 
 # Set build arguments for reproducibility
-ARG TARGETOS
-ARG TARGETARCH
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
 ARG VERSION=dev
 ARG BUILD_DATE
 ARG VCS_REF
+
+# Install build dependencies
+RUN apk add --no-cache \
+    ca-certificates \
+    git
 
 WORKDIR /src
 
@@ -32,8 +30,6 @@ RUN go mod download && go mod verify
 COPY . .
 
 # Build statically-linked binary with security flags
-# -trimpath: Remove file system paths for reproducibility
-# -ldflags: Inject build metadata and strip debug info
 RUN CGO_ENABLED=0 \
     GOOS=${TARGETOS} \
     GOARCH=${TARGETARCH} \
@@ -45,11 +41,18 @@ RUN CGO_ENABLED=0 \
 
 # Verify the binary
 RUN file /app/server && \
-    /app/server -version 2>/dev/null || true
+    chmod +x /app/server
 
 # --- Final Stage ---
-# Use minimal distroless image for security (specific digest for reproducibility)
-FROM gcr.io/distroless/static-debian12:nonroot@sha256:e9ac71e2b8e279a8372741b7a0293afda17650d926900233ec3a7b2b7c22a246
+# Use minimal Alpine image (smaller than distroless but includes shell for health checks)
+FROM alpine:3.19@sha256:51b67269f354137895d43f3b3d810bfacd3945438e94dc5ac55fdac340352f48
+
+# Install runtime dependencies
+RUN apk add --no-cache \
+    ca-certificates \
+    tzdata && \
+    addgroup -g 65532 -S nonroot && \
+    adduser -u 65532 -S nonroot -G nonroot
 
 # Add labels for metadata
 LABEL org.opencontainers.image.title="SLSA L3 Demo Application" \
@@ -57,21 +60,23 @@ LABEL org.opencontainers.image.title="SLSA L3 Demo Application" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.created="${BUILD_DATE}" \
       org.opencontainers.image.revision="${VCS_REF}" \
-      org.opencontainers.image.source="https://github.com/devsecops/thesis-app" \
-      security.slsa.level="3"
+      org.opencontainers.image.source="https://github.com/vivek3030/devsecops-thesis-prototype" \
+      security.slsa.level="3" \
+      org.opencontainers.image.vendor="Hochschule Albstadt-Sigmaringen" \
+      org.opencontainers.image.authors="Vivekkumar Kasundra"
 
 # Copy the statically-linked binary from build stage
 COPY --from=build /app/server /usr/local/bin/server
 
-# Use non-root user (distroless nonroot is UID 65532)
-USER 65532:65532
+# Use non-root user
+USER nonroot:nonroot
 
 # Expose application port
 EXPOSE 8080
 
-# Health check
+# Health check using the application's built-in health endpoint
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD ["/usr/local/bin/server", "-health"] || exit 1
+  CMD ["/usr/local/bin/server", "-health"]
 
 # Run the application
 ENTRYPOINT ["/usr/local/bin/server"]
