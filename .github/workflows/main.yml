@@ -224,11 +224,10 @@ jobs:
           echo "📦 SBOM Components Found: ${COMPONENT_COUNT}"
 
       - name: "🔍 Scan for Vulnerabilities (Grype)"
-        uses: anchore/scan-action@v4
-        with:
-          sbom: bom.json
-          output-format: json
-          fail-build: false
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+          grype sbom:bom.json -o json > vulnerabilities.json
+          echo "✅ Vulnerability scan complete"
 
       - name: "📉 Extract Vulnerability Statistics"
         id: vuln-stats
