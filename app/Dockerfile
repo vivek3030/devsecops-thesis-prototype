@@ -48,23 +48,16 @@ LABEL org.opencontainers.image.title="SLSA L3 Demo Application" \
       security.slsa.level="3" \
       org.opencontainers.image.vendor="Hochschule Albstadt-Sigmaringen" \
       org.opencontainers.image.authors="Vivekkumar Kasundra" \
-      # Security best practices
       org.opencontainers.image.base.name="cgr.dev/chainguard/static" \
       org.opencontainers.image.licenses="Apache-2.0"
 
-# Copy binary
 COPY --from=build /app/server /usr/local/bin/server
 
-# Drop privileges
 USER nonroot
 
-# Avoid running as root AND avoid writable root filesystem
-# (Chainguard static already uses read-only FS)
 EXPOSE 8080
 
-# Set minimal environment
 ENV GODEBUG=madvdontneed=1 \
     TZ=UTC
 
-# Security: no shell, no /bin/sh, distroless model
 ENTRYPOINT ["/usr/local/bin/server"]
