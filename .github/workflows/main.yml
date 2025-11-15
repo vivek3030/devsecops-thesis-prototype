@@ -19,55 +19,48 @@ jobs:
   # Stage 1: Prepare & Verify Source
   # ============================================
   prepare:
-    name: "1️⃣ Prepare & Verify Source"
+    name: "1. Prepare & Verify Source"
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    
+
     outputs:
       build_start_time: ${{ steps.start-time.outputs.time }}
       version: ${{ steps.version.outputs.version }}
       image_name: ${{ steps.image-info.outputs.image_name }}
       image_tag: ${{ steps.image-info.outputs.image_tag }}
-    
+
     steps:
-      - name: "⏱️ Record Start Time"
+      - name: Record Start Time
         id: start-time
         run: echo "time=$(date +%s)" >> $GITHUB_OUTPUT
 
-      - name: "📋 Checkout Repository"
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: "🏷️ Generate Version"
+      - name: Generate Version
         id: version
         run: |
           VERSION="v1.0.${{ github.run_number }}-${GITHUB_SHA::8}"
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          echo "🏷️ Version: ${VERSION}"
 
-      - name: "🏷️ Set Image Information"
+      - name: Set Image Information
         id: image-info
         run: |
           IMAGE_NAME="${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPO }}"
           IMAGE_TAG="${{ steps.version.outputs.version }}"
           echo "image_name=${IMAGE_NAME}" >> $GITHUB_OUTPUT
           echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
-          echo "🏷️ Image Name: ${IMAGE_NAME}"
-          echo "🏷️ Image Tag: ${IMAGE_TAG}"
 
-      - name: "✅ Verify Go Module Files"
+      - name: Verify Go Module Files
         run: |
-          if [[ ! -f app/go.mod || ! -f app/go.sum ]]; then
-            echo "❌ Error: app/go.mod or app/go.sum missing."
-            exit 1
-          fi
-          echo "✅ Go module files verified"
+          [[ -f app/go.mod && -f app/go.sum ]] || exit 1
 
   # ============================================
   # Stage 2: Build Container Image (SLSA L3)
   # ============================================
   build-container:
-    name: "2️⃣ Build Container Image (SLSA L3)"
+    name: "2. Build Container Image (SLSA L3)"
     needs: [prepare]
     runs-on: ubuntu-latest
     permissions:
@@ -75,26 +68,26 @@ jobs:
       packages: write
       id-token: write
       attestations: write
-    
+
     outputs:
       image_digest: ${{ steps.build.outputs.digest }}
       image_ref: ${{ steps.image-ref.outputs.ref }}
-    
+
     steps:
-      - name: "📋 Checkout Repository"
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: "🔐 Log in to GitHub Container Registry"
+      - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
           registry: ${{ env.IMAGE_REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: "🗝️ Set up Docker Buildx"
+      - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: "🐳 Build and Push Docker Image"
+      - name: Build and Push Docker Image
         id: build
         uses: docker/build-push-action@v5
         with:
@@ -110,59 +103,48 @@ jobs:
             BUILD_DATE=${{ needs.prepare.outputs.build_start_time }}
             VCS_REF=${{ github.sha }}
 
-      - name: "🔍 Get Image Digest"
+      - name: Get Image Digest
         id: image-ref
         run: |
           DIGEST="${{ steps.build.outputs.digest }}"
           IMAGE_REF="${{ needs.prepare.outputs.image_name }}@${DIGEST}"
-          
           echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
           echo "ref=${IMAGE_REF}" >> $GITHUB_OUTPUT
-          echo "🔍 Image Digest: ${DIGEST}"
-          echo "🔍 Image Ref: ${IMAGE_REF}"
 
-      - name: "🔐 Install Cosign"
+      - name: Install Cosign
         uses: sigstore/cosign-installer@v3
 
-      - name: "✏️ Sign Container Image (SLSA Requirement)"
+      - name: Sign Container Image
         env:
           COSIGN_EXPERIMENTAL: 1
-        run: |
-          echo "🔐 Signing image with keyless Cosign..."
-          cosign sign --yes "${{ steps.image-ref.outputs.ref }}"
-          echo "✅ Image signed successfully"
+        run: cosign sign --yes "${{ steps.image-ref.outputs.ref }}"
 
-      - name: "📋 Generate SBOM with Syft (CycloneDX)"
+      - name: Generate SBOM with Syft
         uses: anchore/sbom-action@v0
         with:
           image: ${{ steps.image-ref.outputs.ref }}
           format: cyclonedx-json
           output-file: bom.json
 
-      - name: "🔎 Attach SBOM Attestation (SLSA Requirement)"
+      - name: Attach SBOM Attestation
         env:
           COSIGN_EXPERIMENTAL: 1
-        run: |
-          echo "📋 Attaching SBOM attestation..."
-          cosign attest --yes --type cyclonedx --predicate bom.json "${{ steps.image-ref.outputs.ref }}"
-          echo "✅ SBOM attestation attached"
+        run: cosign attest --yes --type cyclonedx --predicate bom.json "${{ steps.image-ref.outputs.ref }}"
 
-      - name: "🔐 Verify Signature (SLSA L3 Verification)"
+      - name: Verify Signature
         env:
           COSIGN_EXPERIMENTAL: 1
         run: |
-          echo "🔍 Verifying image signature..."
           cosign verify \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             --certificate-identity-regexp "^https://github.com/${{ github.repository }}/.*" \
             "${{ steps.image-ref.outputs.ref }}"
-          echo "✅ Signature verified - SLSA L3 Non-falsifiable provenance achieved"
 
   # ============================================
-  # Stage 3: SBOM Generation & Vulnerability Scanning
+  # Stage 3: SBOM & Vulnerability Scanning
   # ============================================
   scan-and-analyze:
-    name: "3️⃣ SBOM Analysis & Vulnerability Scanning"
+    name: "3. SBOM Analysis & Vulnerability Scanning"
     runs-on: ubuntu-latest
     needs: [prepare, build-container]
     permissions:
@@ -182,243 +164,75 @@ jobs:
       sast_high: ${{ steps.sast-stats.outputs.high }}
 
     steps:
-      - name: "📋 Checkout Repository"
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: "🔐 Log in to GitHub Container Registry"
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ${{ env.IMAGE_REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: "⬇️ Pull Signed Image"
+      - name: Pull Signed Image
         id: image-info
         run: |
           IMAGE_REF="${{ needs.build-container.outputs.image_ref }}"
-          echo "📥 Pulling signed image: ${IMAGE_REF}"
           docker pull "${IMAGE_REF}"
-          
-          # Tag locally for easier reference
           docker tag "${IMAGE_REF}" scan-target:latest
-          
           echo "image-ref=scan-target:latest" >> $GITHUB_OUTPUT
-          echo "original-ref=${IMAGE_REF}" >> $GITHUB_OUTPUT
-          echo "✅ Image pulled successfully"
 
-      - name: "📦 Generate SBOM (Syft CycloneDX)"
+      - name: Generate SBOM
         uses: anchore/sbom-action@v0
         with:
           image: ${{ steps.image-info.outputs.image-ref }}
           format: cyclonedx-json
           output-file: bom.json
 
-      - name: "📈 Extract SBOM Statistics"
+      - name: Extract SBOM Statistics
         id: sbom-stats
         run: |
-          echo "📊 Analyzing SBOM..."
-          if [ -f bom.json ] && [ -s bom.json ]; then
-            # Use a more efficient way to count components without loading entire file
-            COMPONENT_COUNT=$(jq '.components | length' bom.json)
-            echo "count=${COMPONENT_COUNT}" >> $GITHUB_OUTPUT
-            echo "📦 SBOM Components Found: ${COMPONENT_COUNT}"
-            
-            # Display limited component details to avoid pipe issues
-            echo "📋 Sample Components:"
-            jq -r '.components[0:5][] | "\(.name) - \(.version // "N/A")"' bom.json 2>/dev/null || echo "  (unable to display details)"
-          else
-            echo "count=0" >> $GITHUB_OUTPUT
-            echo "⚠️ No SBOM generated or empty file"
-          fi
+          COMPONENT_COUNT=$(jq '.components | length' bom.json 2>/dev/null || echo 0)
+          echo "count=${COMPONENT_COUNT}" >> $GITHUB_OUTPUT
 
-      - name: "🔍 Scan for CVE Vulnerabilities (Grype)"
+      - name: Scan for CVEs (Grype)
         run: |
-          echo "🔍 Installing Grype vulnerability scanner..."
           curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
-          
-          echo "🔍 Scanning SBOM for known CVEs..."
-          if [ -f bom.json ] && [ -s bom.json ]; then
-            grype sbom:bom.json -o json > vulnerabilities.json
-            echo "✅ CVE vulnerability scan complete"
-          else
-            echo '{"matches": []}' > vulnerabilities.json
-            echo "⚠️ No SBOM available for CVE scanning, using empty result"
-          fi
+          grype sbom:bom.json -o json > vulnerabilities.json || echo '{"matches": []}' > vulnerabilities.json
 
-      - name: "📉 Extract CVE Vulnerability Statistics"
+      - name: Extract CVE Statistics
         id: vuln-stats
         run: |
-          echo "📊 Analyzing CVE vulnerability scan results..."
-          
-          if [ -f vulnerabilities.json ] && [ -s vulnerabilities.json ]; then
-            TOTAL=$(jq '.matches | length' vulnerabilities.json)
-            CRITICAL=$(jq '[.matches[] | select(.vulnerability.severity == "Critical")] | length' vulnerabilities.json)
-            HIGH=$(jq '[.matches[] | select(.vulnerability.severity == "High")] | length' vulnerabilities.json)
-            MEDIUM=$(jq '[.matches[] | select(.vulnerability.severity == "Medium")] | length' vulnerabilities.json)
-            LOW=$(jq '[.matches[] | select(.vulnerability.severity == "Low")] | length' vulnerabilities.json)
-          else
-            TOTAL=0
-            CRITICAL=0
-            HIGH=0
-            MEDIUM=0
-            LOW=0
-            echo "⚠️ No vulnerability data found"
-          fi
-
+          TOTAL=$(jq '.matches | length' vulnerabilities.json)
+          CRITICAL=$(jq '[.matches[] | select(.vulnerability.severity == "Critical")] | length' vulnerabilities.json)
+          HIGH=$(jq '[.matches[] | select(.vulnerability.severity == "High")] | length' vulnerabilities.json)
+          MEDIUM=$(jq '[.matches[] | select(.vulnerability.severity == "Medium")] | length' vulnerabilities.json)
+          LOW=$(jq '[.matches[] | select(.vulnerability.severity == "Low")] | length' vulnerabilities.json)
           echo "total=${TOTAL}" >> $GITHUB_OUTPUT
           echo "critical=${CRITICAL}" >> $GITHUB_OUTPUT
           echo "high=${HIGH}" >> $GITHUB_OUTPUT
           echo "medium=${MEDIUM}" >> $GITHUB_OUTPUT
           echo "low=${LOW}" >> $GITHUB_OUTPUT
-          
-          echo ""
-          echo "🔍 ===== CVE VULNERABILITY SUMMARY ====="
-          echo "   Critical: ${CRITICAL}"
-          echo "   High:     ${HIGH}"
-          echo "   Medium:   ${MEDIUM}"
-          echo "   Low:      ${LOW}"
-          echo "   --------------------------------"
-          echo "   Total:    ${TOTAL}"
-          echo "========================================"
-          echo ""
-          
-          # Show sample vulnerabilities if any exist
-          if [ "$CRITICAL" -gt 0 ]; then
-            echo "⚠️ CRITICAL CVEs Detected:"
-            jq -r '.matches[] | select(.vulnerability.severity == "Critical") | "  - \(.vulnerability.id): \(.artifact.name)"' vulnerabilities.json | head -3
-          fi
-          
-          if [ "$HIGH" -gt 0 ]; then
-            echo "⚠️ HIGH CVEs Detected:"
-            jq -r '.matches[] | select(.vulnerability.severity == "High") | "  - \(.vulnerability.id): \(.artifact.name)"' vulnerabilities.json | head -3
-          fi
 
-      - name: "🔬 Static Application Security Testing (SAST) - Gosec"
+      - name: Run SAST (Gosec)
         run: |
-          echo "🔬 Installing Gosec for Go code analysis..."
           curl -sfL https://raw.githubusercontent.com/securego/gosec/master/install.sh | sh -s -- -b /usr/local/bin
-          
-          echo "🔍 Running static code analysis on Go application..."
           cd app
-          if gosec -fmt=json -out=../gosec-report.json ./... 2>/dev/null; then
-            echo "✅ SAST scan complete"
-          else
-            echo '{"Issues":[]}' > ../gosec-report.json
-            echo "⚠️ SAST scan failed or found no issues, using empty result"
-          fi
-          cd ..
+          gosec -fmt=json -out=../gosec-report.json ./... || echo '{"Issues":[]}' > ../gosec-report.json
 
-      - name: "📊 Extract SAST Statistics"
+      - name: Extract SAST Statistics
         id: sast-stats
         run: |
-          echo "📊 Analyzing SAST results..."
-          
-          # Check if gosec found any issues
-          if [ -f gosec-report.json ] && [ -s gosec-report.json ]; then
-            # Extract issue counts
-            TOTAL=$(jq '.Issues | length' gosec-report.json 2>/dev/null || echo "0")
-            
-            # Gosec uses severity levels: HIGH, MEDIUM, LOW
-            # Map HIGH to Critical for consistency
-            CRITICAL=$(jq '[.Issues[] | select(.severity == "HIGH")] | length' gosec-report.json 2>/dev/null || echo "0")
-            HIGH=$(jq '[.Issues[] | select(.severity == "MEDIUM")] | length' gosec-report.json 2>/dev/null || echo "0")
-            MEDIUM=$(jq '[.Issues[] | select(.severity == "LOW")] | length' gosec-report.json 2>/dev/null || echo "0")
-          else
-            TOTAL=0
-            CRITICAL=0
-            HIGH=0
-            MEDIUM=0
-            echo "⚠️ No SAST report generated"
-          fi
-          
+          TOTAL=$(jq '.Issues | length' gosec-report.json 2>/dev/null || echo 0)
+          CRITICAL=$(jq '[.Issues[] | select(.severity == "HIGH")] | length' gosec-report.json 2>/dev/null || echo 0)
+          HIGH=$(jq '[.Issues[] | select(.severity == "MEDIUM")] | length' gosec-report.json 2>/dev/null || echo 0)
+          MEDIUM=$(jq '[.Issues[] | select(.severity == "LOW")] | length' gosec-report.json 2>/dev/null || echo 0)
           echo "total=${TOTAL}" >> $GITHUB_OUTPUT
           echo "critical=${CRITICAL}" >> $GITHUB_OUTPUT
           echo "high=${HIGH}" >> $GITHUB_OUTPUT
           echo "medium=${MEDIUM}" >> $GITHUB_OUTPUT
-          
-          echo ""
-          echo "🔬 ===== SAST (CODE) ISSUES SUMMARY ====="
-          echo "   Critical (HIGH): ${CRITICAL}"
-          echo "   High (MEDIUM):   ${HIGH}"
-          echo "   Medium (LOW):    ${MEDIUM}"
-          echo "   --------------------------------"
-          echo "   Total:           ${TOTAL}"
-          echo "========================================="
-          echo ""
-          
-          # Show detailed issues
-          if [ "$TOTAL" -gt 0 ]; then
-            echo "🔍 Code Security Issues Found:"
-            jq -r '.Issues[] | "  ⚠️ [\(.severity)] \(.rule_id): \(.details) (Line: \(.line))"' gosec-report.json | head -5
-            echo ""
-          fi
 
-      - name: "🔍 Trivy Container Scan (Additional Coverage)"
-        run: |
-          echo "🔍 Installing Trivy scanner..."
-          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
-          
-          echo "🔍 Running Trivy container scan..."
-          if trivy image --format json --output trivy-report.json ${{ steps.image-info.outputs.image-ref }} 2>/dev/null; then
-            echo "✅ Trivy scan complete"
-          else
-            echo '{"Results":[]}' > trivy-report.json
-            echo "⚠️ Trivy scan failed, using empty result"
-          fi
-
-      - name: "📊 Combine All Vulnerability Data with Python"
-        run: |
-          echo "📊 Creating combined vulnerability report using Python..."
-          
-          python3 -c "
-          import json
-          import os
-          
-          print('Reading vulnerability files...')
-          
-          # Read files with error handling
-          def read_json_file(filename, default):
-              try:
-                  with open(filename, 'r') as f:
-                      return json.load(f)
-              except (FileNotFoundError, json.JSONDecodeError) as e:
-                  print(f'Warning: Could not read {filename}: {e}')
-                  return default
-          
-          # Read all files
-          vuln_data = read_json_file('vulnerabilities.json', {'matches': []})
-          sast_data = read_json_file('gosec-report.json', {'Issues': []})
-          trivy_data = read_json_file('trivy-report.json', {'Results': []})
-          
-          # Create combined structure
-          combined = {
-              'cve_scan': {
-                  'tool': 'Grype',
-                  'results': vuln_data
-              },
-              'sast_scan': {
-                  'tool': 'Gosec',
-                  'results': sast_data
-              },
-              'container_scan': {
-                  'tool': 'Trivy',
-                  'results': trivy_data
-              }
-          }
-          
-          # Write combined file
-          with open('combined-vulnerabilities.json', 'w') as f:
-              json.dump(combined, f, indent=2)
-          
-          print('✅ Combined report created successfully')
-          print(f'  - CVE matches: {len(vuln_data.get(\"matches\", []))}')
-          print(f'  - SAST issues: {len(sast_data.get(\"Issues\", []))}')
-          print(f'  - Trivy results: {len(trivy_data.get(\"Results\", []))}')
-          "
-          
-          echo "✅ Combined vulnerability data created"
-
-      - name: "💾 Upload SBOM & All Vulnerability Reports"
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -427,533 +241,135 @@ jobs:
             bom.json
             vulnerabilities.json
             gosec-report.json
-            trivy-report.json
-            combined-vulnerabilities.json
           retention-days: 90
 
   # ============================================
   # Stage 4: Policy Enforcement (OPA)
   # ============================================
   policy-enforcement:
-    name: "4️⃣ Security Policy Enforcement (OPA)"
+    name: "4. Security Policy Enforcement (OPA)"
     runs-on: ubuntu-latest
     needs: [prepare, build-container, scan-and-analyze]
     permissions:
       contents: read
 
     outputs:
-      policy_start_time: ${{ steps.policy-start.outputs.time }}
-      policy_end_time: ${{ steps.policy-end.outputs.time }}
       policy_result: ${{ steps.opa_eval.outputs.passed }}
       policy_violations: ${{ steps.opa_eval.outputs.violations }}
       policy_decision: ${{ steps.opa_eval.outputs.decision }}
 
     steps:
-      - name: "⏱️ Record Policy Check Start"
-        id: policy-start
-        run: echo "time=$(date +%s)" >> $GITHUB_OUTPUT
-
-      - name: "📋 Checkout Repository (for policy files)"
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: "⬇️ Download Security Reports"
+      - name: Download Security Reports
         uses: actions/download-artifact@v4
         with:
           name: sbom-and-vulnerabilities
 
-      - name: "🔍 Debug Input Files"
+      - name: Install OPA
         run: |
-          echo "=== Debug: Checking input files ==="
-          ls -la *.json 2>/dev/null || echo "No JSON files found"
-          echo "=== File sizes ==="
-          wc -c *.json 2>/dev/null | head -10 || echo "No files to measure"
+          curl -L -o opa https://github.com/open-policy-agent/opa/releases/latest/download/opa_linux_amd64
+          chmod +x opa
+          sudo mv opa /usr/local/bin/opa
 
-      - name: "🛡️ Install OPA (Open Policy Agent)"
+      - name: Create OPA Input
         run: |
-          echo "📥 Installing OPA..."
-          curl -L -o /tmp/opa https://github.com/open-policy-agent/opa/releases/latest/download/opa_linux_amd64
-          chmod +x /tmp/opa
-          sudo mv /tmp/opa /usr/local/bin/opa
-          echo "OPA version: $(opa version)"
-          echo "✅ OPA installed"
-
-      - name: "🔍 Create OPA Input Data with Python"
-        run: |
-          echo "📝 Creating OPA input with Python (handles large files)..."
-          
-          python3 -c "
-          import json
-          import os
-          
-          print('Reading scan results for OPA input...')
-          
-          # Read files with error handling
-          def read_json_file(filename, default):
-              try:
-                  with open(filename, 'r') as f:
-                      return json.load(f)
-              except (FileNotFoundError, json.JSONDecodeError) as e:
-                  print(f'Warning: Could not read {filename}: {e}')
-                  return default
-          
-          # Read all input files
-          vuln_data = read_json_file('vulnerabilities.json', {'matches': []})
-          sbom_data = read_json_file('bom.json', {'components': []})
-          sast_data = read_json_file('gosec-report.json', {'Issues': []})
-          
-          # Create OPA input structure
-          opa_input = {
-              'vulnerabilities': vuln_data,
-              'sbom': sbom_data,
-              'sast': sast_data,
+          python3 - <<'PY'
+          import json, os
+          def read(f, d): 
+              try: 
+                  with open(f) as j: return json.load(j)
+              except: return d
+          vuln = read('vulnerabilities.json', {'matches': []})
+          sbom = read('bom.json', {'components': []})
+          sast = read('gosec-report.json', {'Issues': []})
+          input_data = {
+              'vulnerabilities': vuln,
+              'sbom': sbom,
+              'sast': sast,
               'slsa_build': {
                   'level': 3,
-                  'builder_id': 'github-actions',
                   'provenance_verified': True,
                   'hermetic_build': True,
                   'signed': True
               },
               'metadata': {
                   'version': '${{ needs.prepare.outputs.version }}',
-                  'commit_sha': '${{ github.sha }}',
-                  'pipeline_run': '${{ github.run_number }}'
+                  'commit_sha': '${{ github.sha }}'
               }
           }
-          
-          # Write OPA input file
           with open('input.json', 'w') as f:
-              json.dump(opa_input, f, indent=2)
-          
-          # Print summary
-          print('✅ OPA input created successfully')
-          print(f'  - CVE Vulnerabilities: {len(vuln_data.get(\"matches\", []))}')
-          print(f'  - SAST Issues: {len(sast_data.get(\"Issues\", []))}')
-          print(f'  - SBOM Components: {len(sbom_data.get(\"components\", []))}')
-          print(f'  - SLSA Level: 3')
-          "
-          
-          echo "✅ OPA input data created"
+              json.dump(input_data, f, indent=2)
+          PY
 
-      - name: "🧪 Test OPA Policy Standalone"
-        run: |
-          # Create a simple test input
-          cat > test-input.json << 'EOF'
-          {
-            "vulnerabilities": {"matches": []},
-            "sbom": {"components": [{"name": "test"}]},
-            "sast": {"Issues": []},
-            "slsa_build": {
-              "level": 3,
-              "builder_id": "github-actions", 
-              "provenance_verified": true,
-              "hermetic_build": true,
-              "signed": true
-            }
-          }
-          EOF
-          
-          echo "🧪 Testing policy with simple input..."
-          if opa eval -i test-input.json -d ./policy 'data.main.allow' --format=json; then
-            echo "✅ Policy test passed"
-          else
-            echo "❌ Policy test failed"
-          fi
-
-      - name: "🔒 Evaluate Security Policy"
+      - name: Evaluate Policy
         id: opa_eval
         run: |
-          set -e
-          
-          echo ""
-          echo "🛡️ ===== SECURITY POLICY EVALUATION ====="
-          echo ""
-          
-          # First, validate input.json exists and is valid JSON
-          echo "🔍 Validating input data..."
-          if [ ! -f input.json ] || [ ! -s input.json ]; then
-            echo "❌ input.json is missing or empty"
-            echo "passed=false" >> $GITHUB_OUTPUT
-            echo "violations=1" >> $GITHUB_OUTPUT
-            echo "decision=ERROR" >> $GITHUB_OUTPUT
-            exit 1
-          fi
-          
-          # Validate JSON syntax
-          if ! jq empty input.json 2>/dev/null; then
-            echo "❌ input.json contains invalid JSON"
-            echo "passed=false" >> $GITHUB_OUTPUT
-            echo "violations=1" >> $GITHUB_OUTPUT
-            echo "decision=ERROR" >> $GITHUB_OUTPUT
-            exit 1
-          fi
-          
-          # Test OPA policy syntax first
-          echo "🔍 Testing OPA policy syntax..."
-          if ! opa check ./policy; then
-            echo "❌ OPA policy has syntax errors"
-            echo "passed=false" >> $GITHUB_OUTPUT
-            echo "violations=1" >> $GITHUB_OUTPUT
-            echo "decision=ERROR" >> $GITHUB_OUTPUT
-            exit 1
-          fi
-          
-          # Evaluate the allow rule with better error handling
-          echo "📋 Checking policy compliance..."
-          ALLOW_RESULT=$(opa eval -i input.json -d ./policy 'data.main.allow' --format=json 2>&1)
-          
-          # Check if OPA command succeeded
-          if [ $? -ne 0 ]; then
-            echo "❌ OPA evaluation failed: $ALLOW_RESULT"
-            echo "passed=false" >> $GITHUB_OUTPUT
-            echo "violations=1" >> $GITHUB_OUTPUT
-            echo "decision=ERROR" >> $GITHUB_OUTPUT
-            exit 1
-          fi
-          
-          # Extract the allow value safely
-          PASSED=$(echo "$ALLOW_RESULT" | jq -r '.result[0].expressions[0].value // false' 2>/dev/null || echo "false")
+          opa check ./policy || exit 1
+          PASSED=$(opa eval -i input.json -d ./policy 'data.main.allow' --format=json | jq -r '.result[0].expressions[0].value // false')
+          VIOLATIONS=$(opa eval -i input.json -d ./policy 'data.main.deny' --format=json | jq -r '.result[0].expressions[0].value | length // 0')
           echo "passed=${PASSED}" >> $GITHUB_OUTPUT
-          echo "✅ Policy evaluation completed: ${PASSED}"
-          
-          # Get violations
-          echo "📋 Checking for policy violations..."
-          VIOLATIONS_RESULT=$(opa eval -i input.json -d ./policy 'data.main.deny' --format=json 2>&1)
-          if [ $? -eq 0 ]; then
-            VIOLATION_COUNT=$(echo "$VIOLATIONS_RESULT" | jq -r '.result[0].expressions[0].value | length // 0')
-          else
-            echo "⚠️ Could not evaluate deny rules: $VIOLATIONS_RESULT"
-            VIOLATION_COUNT=0
-          fi
-          echo "violations=${VIOLATION_COUNT}" >> $GITHUB_OUTPUT
-          
-          # Get warnings
-          echo "📋 Checking for warnings..."
-          WARNINGS_RESULT=$(opa eval -i input.json -d ./policy 'data.main.warnings' --format=json 2>&1)
-          if [ $? -eq 0 ]; then
-            WARNING_COUNT=$(echo "$WARNINGS_RESULT" | jq -r '.result[0].expressions[0].value | length // 0')
-          else
-            echo "⚠️ Could not evaluate warnings: $WARNINGS_RESULT"
-            WARNING_COUNT=0
-          fi
-          
-          # Get compliance report
-          echo "📋 Generating compliance report..."
-          COMPLIANCE_RESULT=$(opa eval -i input.json -d ./policy 'data.main.compliance_report' --format=json 2>&1)
-          if [ $? -eq 0 ]; then
-            COMPLIANCE_DATA=$(echo "$COMPLIANCE_RESULT" | jq -r '.result[0].expressions[0].value // {}')
-          else
-            echo "⚠️ Could not generate compliance report: $COMPLIANCE_RESULT"
-            COMPLIANCE_DATA="{}"
-          fi
-          
-          echo ""
-          echo "📊 ===== POLICY EVALUATION RESULTS ====="
-          echo "   Compliance Status: ${PASSED}"
-          echo "   Violations: ${VIOLATION_COUNT}"
-          echo "   Warnings: ${WARNING_COUNT}"
-          echo "========================================="
-          echo ""
-          
-          # Display violations if any
-          if [ "$VIOLATION_COUNT" -gt 0 ]; then
-            echo "❌ POLICY VIOLATIONS DETECTED:"
-            echo "$VIOLATIONS_RESULT" | jq -r '.result[0].expressions[0].value[]?' 2>/dev/null | head -5 | while read -r violation; do
-              if [ -n "$violation" ]; then
-                echo "   ❌ $violation"
-              fi
-            done
-            echo ""
-          fi
-          
-          # Display warnings if any
-          if [ "$WARNING_COUNT" -gt 0 ]; then
-            echo "⚠️ POLICY WARNINGS:"
-            echo "$WARNINGS_RESULT" | jq -r '.result[0].expressions[0].value[]?' 2>/dev/null | head -5 | while read -r warning; do
-              if [ -n "$warning" ]; then
-                echo "   ⚠️ $warning"
-              fi
-            done
-            echo ""
-          fi
-          
-          # Display detailed compliance report
-          echo "📋 DETAILED COMPLIANCE REPORT:"
-          echo "$COMPLIANCE_DATA" | jq '.' 2>/dev/null || echo "{}"
-          echo ""
-          
-          # Display vulnerability summary from compliance report
-          if echo "$COMPLIANCE_DATA" | jq -e '.cve' >/dev/null 2>&1; then
-            echo "🔍 Vulnerability Breakdown from Policy:"
-            echo "   Critical: $(echo "$COMPLIANCE_DATA" | jq -r '.cve.critical // 0')"
-            echo "   High:     $(echo "$COMPLIANCE_DATA" | jq -r '.cve.high // 0')"
-            echo "   Medium:   $(echo "$COMPLIANCE_DATA" | jq -r '.cve.medium // 0')"
-            echo "   Low:      $(echo "$COMPLIANCE_DATA" | jq -r '.cve.low // 0')"
-            echo ""
-          fi
-          
-          # Set decision output
-          if [ "$PASSED" = "true" ]; then
-            echo "decision=APPROVED" >> $GITHUB_OUTPUT
-            echo "✅ ===== POLICY CHECK PASSED ====="
-            echo "   The image meets all security requirements"
-            echo "   and can proceed to deployment."
-            echo "===================================="
-          else
-            echo "decision=REJECTED" >> $GITHUB_OUTPUT
-            echo "❌ ===== POLICY CHECK FAILED ====="
-            if [ "$VIOLATION_COUNT" -gt 0 ]; then
-              echo "   The image does NOT meet security requirements."
-              echo "   Deployment is BLOCKED due to policy violations."
-            else
-              echo "   Policy evaluation returned false but no specific violations found."
-              echo "   Check policy logic and input data structure."
-            fi
-            echo ""
-            echo "   Review the violations and vulnerability counts above."
-            echo "   Check Stage 3 logs for detailed CVE information."
-            echo "===================================="
-            exit 1
-          fi
-
-      - name: "⏱️ Record Policy Check End"
-        id: policy-end
-        if: always()
-        run: echo "time=$(date +%s)" >> $GITHUB_OUTPUT
-        
-      - name: "💾 Upload Policy Evaluation Results"
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: policy-evaluation
-          path: |
-            input.json
-            test-input.json
-          retention-days: 90
+          echo "violations=${VIOLATIONS}" >> $GITHUB_OUTPUT
+          echo "decision=$( [ "$PASSED" = "true" ] && echo APPROVED || echo REJECTED )" >> $GITHUB_OUTPUT
+          [ "$PASSED" = "true" ] || exit 1
 
   # ============================================
-  # Stage 5: Comprehensive Metrics & Reporting
+  # Stage 5: Metrics & Reporting
   # ============================================
   metrics-and-report:
-    name: "5️⃣ Generate Metrics & Security Report"
+    name: "5. Generate Metrics & Report"
     runs-on: ubuntu-latest
     needs: [prepare, build-container, scan-and-analyze, policy-enforcement]
     if: always()
     permissions:
       contents: read
-    
+
     steps:
-      - name: "📋 Checkout Repository"
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: "📊 Calculate Pipeline Metrics"
-        id: calculate
+      - name: Generate Metrics Report
         run: |
-          BUILD_START=${{ needs.prepare.outputs.build_start_time || '0' }}
-          POLICY_START=${{ needs.policy-enforcement.outputs.policy_start_time || '0' }}
-          POLICY_END=${{ needs.policy-enforcement.outputs.policy_end_time || '0' }}
-          CURRENT_TIME=$(date +%s)
-          
-          if [ "$BUILD_START" != "0" ] && [ "$POLICY_START" != "0" ] && [ "$POLICY_END" != "0" ]; then
-            POLICY_DURATION=$((POLICY_END - POLICY_START))
-            TOTAL_DURATION=$((CURRENT_TIME - BUILD_START))
-          else
-            POLICY_DURATION=0
-            TOTAL_DURATION=0
-          fi
+          mkdir -p reports
+          cat > reports/security-report.md << 'EOF'
+          # SLSA Level 3 Security Report
 
-          echo "policy_duration=${POLICY_DURATION}" >> $GITHUB_OUTPUT
-          echo "total_duration=${TOTAL_DURATION}" >> $GITHUB_OUTPUT
-
-          echo "⏱️ Pipeline Duration Metrics:"
-          echo "   Policy Check: ${POLICY_DURATION}s"
-          echo "   Total Pipeline: ${TOTAL_DURATION}s"
-
-      - name: "📊 Create Comprehensive Metrics Report"
-        run: |
-          mkdir -p metrics reports
-          
-          # Create JSON metrics
-          cat > metrics/run-${{ github.run_number }}.json << EOF
-          {
-            "pipeline_metadata": {
-              "run_number": ${{ github.run_number }},
-              "run_id": "${{ github.run_id }}",
-              "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-              "commit_sha": "${{ github.sha }}",
-              "version": "${{ needs.prepare.outputs.version }}",
-              "branch": "${{ github.ref_name }}"
-            },
-            "performance_metrics": {
-              "policy_duration_seconds": ${{ steps.calculate.outputs.policy_duration }},
-              "total_duration_seconds": ${{ steps.calculate.outputs.total_duration }}
-            },
-            "sbom_analysis": {
-              "components_discovered": ${{ needs.scan-and-analyze.outputs.sbom_components_count || 0 }},
-              "format": "CycloneDX-JSON"
-            },
-            "vulnerability_analysis": {
-              "total_vulnerabilities": ${{ needs.scan-and-analyze.outputs.vulnerabilities_found || 0 }},
-              "by_severity": {
-                "critical": ${{ needs.scan-and-analyze.outputs.critical_count || 0 }},
-                "high": ${{ needs.scan-and-analyze.outputs.high_count || 0 }},
-                "medium": ${{ needs.scan-and-analyze.outputs.medium_count || 0 }},
-                "low": ${{ needs.scan-and-analyze.outputs.low_count || 0 }}
-              }
-            },
-            "policy_enforcement": {
-              "policy_passed": "${{ needs.policy-enforcement.outputs.policy_result || 'false' }}",
-              "violations_count": ${{ needs.policy-enforcement.outputs.policy_violations || 0 }},
-              "decision": "${{ needs.policy-enforcement.outputs.policy_decision || 'UNKNOWN' }}"
-            },
-            "slsa_compliance": {
-              "level": "3",
-              "provenance_generated": true,
-              "non_falsifiable": true,
-              "hermetic_build": true,
-              "signed": true,
-              "sbom_attached": true,
-              "policy_enforced": true
-            },
-            "artifact_information": {
-              "registry": "${{ env.IMAGE_REGISTRY }}",
-              "repository": "${{ env.IMAGE_REPO }}",
-              "tag": "${{ needs.prepare.outputs.image_tag }}",
-              "digest": "${{ needs.build-container.outputs.image_digest }}",
-              "full_reference": "${{ needs.build-container.outputs.image_ref }}"
-            }
-          }
-          EOF
-
-          echo "✅ Metrics report generated: metrics/run-${{ github.run_number }}.json"
-          
-          # Create human-readable report
-          cat > reports/security-report-${{ github.run_number }}.md << 'MDEOF'
-          # 🔒 Software Supply Chain Security Report
-          
-          **Pipeline Run:** #${{ github.run_number }}  
-          **Date:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")  
           **Version:** ${{ needs.prepare.outputs.version }}  
-          **Commit:** ${{ github.sha }}
-          
-          ---
-          
-          ## 📦 SBOM Analysis
-          
-          - **Components Identified:** ${{ needs.scan-and-analyze.outputs.sbom_components_count || 0 }}
-          - **Format:** CycloneDX JSON
-          - **Generation Tool:** Syft
-          
-          ## 🔍 Vulnerability Scan Results
-          
+          **Image:** `${{ needs.build-container.outputs.image_ref }}`  
+          **Commit:** `${{ github.sha }}`
+
+          ## SBOM
+          - Components: ${{ needs.scan-and-analyze.outputs.sbom_components_count || 0 }}
+
+          ## Vulnerabilities
           | Severity | Count |
           |----------|-------|
-          | 🔴 Critical | ${{ needs.scan-and-analyze.outputs.critical_count || 0 }} |
-          | 🟠 High | ${{ needs.scan-and-analyze.outputs.high_count || 0 }} |
-          | 🟡 Medium | ${{ needs.scan-and-analyze.outputs.medium_count || 0 }} |
-          | 🟢 Low | ${{ needs.scan-and-analyze.outputs.low_count || 0 }} |
+          | Critical | ${{ needs.scan-and-analyze.outputs.critical_count || 0 }} |
+          | High     | ${{ needs.scan-and-analyze.outputs.high_count || 0 }} |
+          | Medium   | ${{ needs.scan-and-analyze.outputs.medium_count || 0 }} |
+          | Low      | ${{ needs.scan-and-analyze.outputs.low_count || 0 }} |
           | **Total** | **${{ needs.scan-and-analyze.outputs.vulnerabilities_found || 0 }}** |
-          
-          ## 🛡️ Policy Enforcement
-          
-          - **Status:** ${{ needs.policy-enforcement.outputs.policy_result == 'true' && '✅ PASSED' || '❌ FAILED' }}
-          - **Decision:** ${{ needs.policy-enforcement.outputs.policy_decision || 'UNKNOWN' }}
-          - **Violations:** ${{ needs.policy-enforcement.outputs.policy_violations || 0 }}
-          
-          ## 🏆 SLSA Level 3 Compliance
-          
-          | Requirement | Status |
-          |-------------|--------|
-          | Build System | ✅ GitHub Actions |
-          | Provenance Generation | ✅ Completed |
-          | Non-falsifiable | ✅ Sigstore/Cosign |
-          | Hermetic Build | ✅ Docker Buildx |
-          | Image Signing | ✅ Keyless Signing |
-          | SBOM Attached | ✅ CycloneDX |
-          | Policy Enforcement | ✅ OPA |
-          
-          ## 📊 Performance Metrics
-          
-          - **Policy Check Duration:** ${{ steps.calculate.outputs.policy_duration }}s
-          - **Total Pipeline Duration:** ${{ steps.calculate.outputs.total_duration }}s
-          
-          ## 🐳 Artifact Information
-          
-          - **Image:** `${{ needs.build-container.outputs.image_ref }}`
-          - **Registry:** ${{ env.IMAGE_REGISTRY }}
-          - **Repository:** ${{ env.IMAGE_REPO }}
-          - **Tag:** ${{ needs.prepare.outputs.image_tag }}
-          
-          ---
-          
-          *This report demonstrates automated software supply chain security with integrated SBOM generation, vulnerability scanning, and SLSA L3 compliance.*
-          MDEOF
-          
-          echo "✅ Security report generated: reports/security-report-${{ github.run_number }}.md"
 
-      - name: "💾 Upload Metrics & Reports"
+          ## Policy
+          - Status: ${{ needs.policy-enforcement.outputs.policy_result == 'true' && 'PASSED' || 'FAILED' }}
+          - Decision: ${{ needs.policy-enforcement.outputs.policy_decision }}
+
+          ## SLSA L3
+          - Provenance, Signing, SBOM, Policy: All Compliant
+          EOF
+
+      - name: Upload Report
         uses: actions/upload-artifact@v4
         with:
-          name: pipeline-metrics-and-reports
-          path: |
-            metrics/
-            reports/
+          name: security-report
+          path: reports/
           retention-days: 90
 
-      - name: "📊 Pipeline Summary (GitHub Actions)"
+      - name: Summary
         if: always()
         run: |
-          echo "# 🏆 SLSA Level 3 Supply Chain Security Pipeline" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Mission:** Automating Software Supply Chain Security with SBOM and SLSA Compliance" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          echo "## 📦 Build Information" >> $GITHUB_STEP_SUMMARY
-          echo "- **Version:** \`${{ needs.prepare.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Image:** \`${{ needs.build-container.outputs.image_ref }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          echo "## 📋 SBOM Analysis" >> $GITHUB_STEP_SUMMARY
-          echo "- **Components:** ${{ needs.scan-and-analyze.outputs.sbom_components_count || 0 }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Format:** CycloneDX JSON" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          echo "## 🔍 Vulnerability Scan" >> $GITHUB_STEP_SUMMARY
-          echo "### CVE Vulnerabilities (Dependencies)" >> $GITHUB_STEP_SUMMARY
-          echo "| Severity | Count |" >> $GITHUB_STEP_SUMMARY
-          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| 🔴 Critical | ${{ needs.scan-and-analyze.outputs.critical_count || 0 }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🟠 High | ${{ needs.scan-and-analyze.outputs.high_count || 0 }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🟡 Medium | ${{ needs.scan-and-analyze.outputs.medium_count || 0 }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🟢 Low | ${{ needs.scan-and-analyze.outputs.low_count || 0 }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Total** | **${{ needs.scan-and-analyze.outputs.vulnerabilities_found || 0 }}** |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Code Security Issues (SAST)" >> $GITHUB_STEP_SUMMARY
-          echo "| Severity | Count |" >> $GITHUB_STEP_SUMMARY
-          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| 🔴 Critical | ${{ needs.scan-and-analyze.outputs.sast_critical || 0 }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🟠 High | ${{ needs.scan-and-analyze.outputs.sast_high || 0 }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Total** | **${{ needs.scan-and-analyze.outputs.sast_issues_found || 0 }}** |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          echo "## 🛡️ Policy Enforcement" >> $GITHUB_STEP_SUMMARY
-          echo "- **Status:** ${{ needs.policy-enforcement.outputs.policy_result == 'true' && '✅ PASSED' || '❌ FAILED' }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Decision:** \`${{ needs.policy-enforcement.outputs.policy_decision || 'UNKNOWN' }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Violations:** ${{ needs.policy-enforcement.outputs.policy_violations || 0 }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          echo "## 🏆 SLSA Level 3 Compliance" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ **Provenance:** Non-falsifiable (Sigstore)" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ **Build System:** Hermetic (Docker Buildx)" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ **Signing:** Keyless with Cosign" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ **SBOM:** CycloneDX attached" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ **Policy:** OPA enforcement" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          echo "## ⏱️ Performance" >> $GITHUB_STEP_SUMMARY
-          echo "- **Total Duration:** ${{ steps.calculate.outputs.total_duration }}s" >> $GITHUB_STEP_SUMMARY
-          echo "- **Policy Check:** ${{ steps.calculate.outputs.policy_duration }}s" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          echo "---" >> $GITHUB_STEP_SUMMARY
-          echo "*Automated Software Supply Chain Security Framework*" >> $GITHUB_STEP_SUMMARY
+          echo "# SLSA L3 Pipeline" >> $GITHUB_STEP_SUMMARY
+          echo "- Image: \`${{ needs.build-container.outputs.image_ref }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Policy: ${{ needs.policy-enforcement.outputs.policy_result == 'true' && 'PASSED' || 'FAILED' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Vulnerabilities: ${{ needs.scan-and-analyze.outputs.vulnerabilities_found || 0 }}" >> $GITHUB_STEP_SUMMARY
