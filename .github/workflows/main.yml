@@ -352,6 +352,8 @@ jobs:
       - name: "🔒 Evaluate Security Policy"
         id: opa_eval
         run: |
+          set -e
+          
           echo ""
           echo "🛡️ ===== SECURITY POLICY EVALUATION ====="
           echo ""
@@ -359,7 +361,7 @@ jobs:
           # Evaluate the allow rule
           echo "📋 Checking policy compliance..."
           ALLOW_RESULT=$(opa eval -i input.json -d ./policy 'data.main.allow' --format=json 2>&1) || true
-          PASSED=$(echo "$ALLOW_RESULT" | jq -r '.result[0].expressions[0].value // false')
+          PASSED=$(echo "$ALLOW_RESULT" | jq -r '.result[0].expressions[0].value // false' | tr -d '[:space:]')
           
           echo "passed=${PASSED}" >> $GITHUB_OUTPUT
           
@@ -367,19 +369,28 @@ jobs:
           echo "📋 Checking for policy violations..."
           VIOLATIONS_RESULT=$(opa eval -i input.json -d ./policy 'data.main.deny' --format=json 2>/dev/null || echo '{"result":[{"expressions":[{"value":[]}]}]}')
           
-          # Extract violations array
-          VIOLATIONS_ARRAY=$(echo "$VIOLATIONS_RESULT" | jq -r '.result[0].expressions[0].value // []')
-          VIOLATION_COUNT=$(echo "$VIOLATIONS_ARRAY" | jq '. | length')
+          # Extract violations count with proper cleanup
+          VIOLATION_COUNT=$(echo "$VIOLATIONS_RESULT" | jq -r '.result[0].expressions[0].value | length' | tr -d '[:space:]')
+          
+          # Validate it's a number
+          if ! [[ "$VIOLATION_COUNT" =~ ^[0-9]+$ ]]; then
+            VIOLATION_COUNT=0
+          fi
           
           echo "violations=${VIOLATION_COUNT}" >> $GITHUB_OUTPUT
           
           # Get warnings
           WARNINGS_RESULT=$(opa eval -i input.json -d ./policy 'data.main.warnings' --format=json 2>/dev/null || echo '{"result":[{"expressions":[{"value":[]}]}]}')
-          WARNINGS_ARRAY=$(echo "$WARNINGS_RESULT" | jq -r '.result[0].expressions[0].value // []')
-          WARNING_COUNT=$(echo "$WARNINGS_ARRAY" | jq '. | length')
+          WARNING_COUNT=$(echo "$WARNINGS_RESULT" | jq -r '.result[0].expressions[0].value | length' | tr -d '[:space:]')
+          
+          # Validate it's a number
+          if ! [[ "$WARNING_COUNT" =~ ^[0-9]+$ ]]; then
+            WARNING_COUNT=0
+          fi
           
           # Get compliance report
           COMPLIANCE=$(opa eval -i input.json -d ./policy 'data.main.compliance_report' --format=json 2>/dev/null || echo '{"result":[{"expressions":[{"value":{}}]}]}')
+          COMPLIANCE_DATA=$(echo "$COMPLIANCE" | jq -r '.result[0].expressions[0].value // {}')
           
           echo ""
           echo "📊 ===== POLICY EVALUATION RESULTS ====="
@@ -392,7 +403,7 @@ jobs:
           # Display violations if any
           if [ "$VIOLATION_COUNT" -gt 0 ]; then
             echo "❌ POLICY VIOLATIONS DETECTED:"
-            echo "$VIOLATIONS_ARRAY" | jq -r '.[]' | while read -r violation; do
+            echo "$VIOLATIONS_RESULT" | jq -r '.result[0].expressions[0].value[]' 2>/dev/null | while read -r violation; do
               echo "   ❌ $violation"
             done
             echo ""
@@ -401,7 +412,7 @@ jobs:
           # Display warnings if any
           if [ "$WARNING_COUNT" -gt 0 ]; then
             echo "⚠️ POLICY WARNINGS:"
-            echo "$WARNINGS_ARRAY" | jq -r '.[]' | while read -r warning; do
+            echo "$WARNINGS_RESULT" | jq -r '.result[0].expressions[0].value[]' 2>/dev/null | while read -r warning; do
               echo "   ⚠️ $warning"
             done
             echo ""
@@ -409,8 +420,18 @@ jobs:
           
           # Display detailed compliance report
           echo "📋 DETAILED COMPLIANCE REPORT:"
-          echo "$COMPLIANCE" | jq -r '.result[0].expressions[0].value' | jq '.'
+          echo "$COMPLIANCE_DATA" | jq '.' 2>/dev/null || echo "{}"
           echo ""
+          
+          # Display vulnerability summary from compliance report
+          if echo "$COMPLIANCE_DATA" | jq -e '.critical' >/dev/null 2>&1; then
+            echo "🔍 Vulnerability Breakdown from Policy:"
+            echo "   Critical: $(echo "$COMPLIANCE_DATA" | jq -r '.critical // 0')"
+            echo "   High:     $(echo "$COMPLIANCE_DATA" | jq -r '.high // 0')"
+            echo "   Medium:   $(echo "$COMPLIANCE_DATA" | jq -r '.medium // 0')"
+            echo "   Low:      $(echo "$COMPLIANCE_DATA" | jq -r '.low // 0')"
+            echo ""
+          fi
           
           # Set decision output
           if [ "$PASSED" = "true" ]; then
@@ -425,7 +446,9 @@ jobs:
             echo "❌ ===== POLICY CHECK FAILED ====="
             echo "   The image does NOT meet security requirements."
             echo "   Deployment is BLOCKED."
-            echo "   Please review violations above and remediate."
+            echo ""
+            echo "   Review the violations and vulnerability counts above."
+            echo "   Check Stage 3 logs for detailed CVE information."
             echo "===================================="
             exit 1
           fi
