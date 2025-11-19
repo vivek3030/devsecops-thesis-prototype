@@ -80,36 +80,66 @@ func versionHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ---------- VULNERABLE CODE START ----------
+// ---------- SECURE CODE ----------
 
-// G101: Hardcoded credentials
-const apiKey = "AKIAIOSFODNN7EXAMPLE"
-
-// G404: Insecure random (misused later)
-func insecureToken() string {
-	b := make([]byte, 8)
-	rand.Read(b)
-	return fmt.Sprintf("%x", b)[:8]
+// secureToken generates a cryptographically secure random token
+func secureToken() (string, error) {
+	b := make([]byte, 16)
+	_, err := rand.Read(b)
+	if err != nil {
+		return "", fmt.Errorf("failed to generate secure token: %w", err)
+	}
+	return fmt.Sprintf("%x", b), nil
 }
 
-// G305: Path traversal risk
+// fileHandler returns file metadata (safe implementation)
 func fileHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
-	file := vars["file"]
-	// No sanitization → attacker can request /files/../../../etc/passwd
-	data, _ := ioutil.ReadFile("/data/" + file) // G104: error ignored
-	w.Write(data)
-}
+	requestFile := vars["file"]
 
-// G104: Error swallowing
-func doSomething() {
-	_, err := os.Open("/nonexistent")
+	// Sanitize: reject paths with traversal attempts
+	if requestFile == "" || requestFile == ".." || (len(requestFile) > 0 && requestFile[0] == '/') {
+		writeJSON(w, http.StatusBadRequest, jsonResponse{"error": "invalid file path"})
+		return
+	}
+
+	// Check for backslashes (Windows path traversal)
+	for _, part := range requestFile {
+		if part == '\\' {
+			writeJSON(w, http.StatusBadRequest, jsonResponse{"error": "invalid file path"})
+			return
+		}
+	}
+
+	filePath := "/data/" + requestFile
+
+	// Check file exists and is readable
+	info, err := os.Stat(filePath)
 	if err != nil {
-		// ignored
+		log.Printf("file access error: %v", err)
+		writeJSON(w, http.StatusNotFound, jsonResponse{"error": "file not found"})
+		return
+	}
+
+	if info.IsDir() {
+		writeJSON(w, http.StatusBadRequest, jsonResponse{"error": "directories not allowed"})
+		return
+	}
+
+	data, err := ioutil.ReadFile(filePath)
+	if err != nil {
+		log.Printf("failed to read file: %v", err)
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": "failed to read file"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	if _, err := w.Write(data); err != nil {
+		log.Printf("error writing file response: %v", err)
 	}
 }
 
-// ---------- VULNERABLE CODE END ----------
+// ---------- END SECURE CODE ----------
 
 func main() {
 	// Flags
@@ -154,9 +184,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Trigger Gosec findings at startup
-	_ = insecureToken()
-	doSomething()
+	// Initialize secure token
+	token, err := secureToken()
+	if err != nil {
+		log.Fatalf("failed to generate secure token: %v", err)
+	}
+	log.Printf("Secure token initialized: %s", token[:8]+"...")
 
 	// Router
 	r := mux.NewRouter()
@@ -165,7 +198,7 @@ func main() {
 	r.HandleFunc("/health", healthHandler).Methods("GET")
 	r.HandleFunc("/ready", readyHandler).Methods("GET")
 	r.HandleFunc("/version", versionHandler).Methods("GET")
-	r.HandleFunc("/files/{file}", fileHandler).Methods("GET") // VULNERABLE
+	r.HandleFunc("/files/{file}", fileHandler).Methods("GET")
 
 	srv := &http.Server{
 		Handler:      r,
