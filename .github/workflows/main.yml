@@ -55,13 +55,13 @@ jobs:
           echo "🏷️ Image Name: ${IMAGE_NAME}"
           echo "🏷️ Image Tag: ${IMAGE_TAG}"
 
-      - name: "✅ Verify Go Module Files"
+      - name: "✅ Verify Source Files"
         run: |
-          if [[ ! -f app/go.mod || ! -f app/go.sum ]]; then
-            echo "❌ Error: app/go.mod or app/go.sum missing."
+          if [[ ! -d app ]]; then
+            echo "❌ Error: app directory missing."
             exit 1
           fi
-          echo "✅ Go module files verified"
+          echo "✅ Source files verified"
 
   # ============================================
   # Stage 2: Build Container Image (SLSA L3)
@@ -181,6 +181,7 @@ jobs:
       sast_high: ${{ steps.sast-stats.outputs.high }}
       sast_medium: ${{ steps.sast-stats.outputs.medium }}
       sast_low: ${{ steps.sast-stats.outputs.low }}
+      secrets_found: ${{ steps.sast-stats.outputs.secrets }}
 
     steps:
       - name: "📋 Checkout Repository"
@@ -252,66 +253,98 @@ jobs:
           echo "   Total:    ${TOTAL}"
           echo "========================================"
 
-      - name: "🔬 Static Application Security Testing (SAST) - Gosec"
+      - name: "🔬 Static Application Security Testing (SAST) - Semgrep"
         run: |
-          echo "🔬 Installing Gosec for Go code analysis..."
-          curl -sfL https://raw.githubusercontent.com/securego/gosec/master/install.sh | sh -s -- -b /usr/local/bin
+          echo "🔬 Installing Semgrep for multi-language code analysis..."
+          python3 -m pip install semgrep
           
-          echo "🔍 Running static code analysis on Go application..."
-          cd app
-          # Run gosec and always continue (don't fail on findings)
-          gosec -fmt=json -out=../gosec-report.json ./... 2>&1 || true
-          cd ..
+          echo "🔍 Running static code analysis on application (language-agnostic)..."
+          # Run Semgrep with security audit rules
+          semgrep scan --config=p/security-audit --json --output=semgrep-report.json app/ 2>&1 || true
           
           # Ensure the file exists with valid JSON
-          if [ ! -f gosec-report.json ]; then
-            echo '{"Issues":[]}' > gosec-report.json
+          if [ ! -f semgrep-report.json ]; then
+            echo '{"results": []}' > semgrep-report.json
           fi
           
           echo "✅ SAST scan complete"
+      
+      - name: "🔐 Secret Detection (TruffleHog)"
+        run: |
+          echo "🔐 Installing TruffleHog for secret detection..."
+          python3 -m pip install truffleHog
+          
+          echo "🔍 Scanning for hardcoded secrets..."
+          trufflehog filesystem app/ --json > trufflehog-report.json 2>&1 || true
+          
+          # Ensure the file exists with valid JSON
+          if [ ! -f trufflehog-report.json ]; then
+            echo '[]' > trufflehog-report.json
+          fi
+          
+          echo "✅ Secret scan complete"
 
       - name: "📊 Extract SAST Statistics"
         id: sast-stats
         run: |
           echo "📊 Analyzing SAST results..."
           
-          # Check if file exists and has content
-          if [ ! -f gosec-report.json ] || [ ! -s gosec-report.json ]; then
-            echo "⚠️ No SAST report generated or file is empty"
-            echo '{"Issues":[]}' > gosec-report.json
+          # Check if files exist and have content
+          if [ ! -f semgrep-report.json ] || [ ! -s semgrep-report.json ]; then
+            echo "⚠️ No Semgrep report generated or file is empty"
+            echo '{"results": []}' > semgrep-report.json
           fi
           
-          # Extract issue counts with fallback to 0
-          TOTAL=$(jq '.Issues | length' gosec-report.json 2>/dev/null || echo "0")
-          CRITICAL=$(jq '[.Issues[] | select(.severity == "CRITICAL")] | length' gosec-report.json 2>/dev/null || echo "0")
-          HIGH=$(jq '[.Issues[] | select(.severity == "HIGH")] | length' gosec-report.json 2>/dev/null || echo "0")
-          MEDIUM=$(jq '[.Issues[] | select(.severity == "MEDIUM")] | length' gosec-report.json 2>/dev/null || echo "0")
+          if [ ! -f trufflehog-report.json ] || [ ! -s trufflehog-report.json ]; then
+            echo "⚠️ No TruffleHog report generated or file is empty"
+            echo '[]' > trufflehog-report.json
+          fi
+          
+          # Extract Semgrep issue counts by severity
+          TOTAL=$(jq '.results | length' semgrep-report.json 2>/dev/null || echo "0")
+          CRITICAL=$(jq '[.results[] | select(.extra.severity == "ERROR")] | length' semgrep-report.json 2>/dev/null || echo "0")
+          HIGH=$(jq '[.results[] | select(.extra.severity == "WARNING")] | length' semgrep-report.json 2>/dev/null || echo "0")
+          MEDIUM=$(jq '[.results[] | select(.extra.severity == "INFO")] | length' semgrep-report.json 2>/dev/null || echo "0")
+          LOW=$(jq '[.results[] | select(.extra.severity == "NOTE")] | length' semgrep-report.json 2>/dev/null || echo "0")
+          
+          # Count secrets found
+          SECRETS=$(jq '. | length' trufflehog-report.json 2>/dev/null || echo "0")
           
           echo "total=${TOTAL}" >> $GITHUB_OUTPUT
           echo "critical=${CRITICAL}" >> $GITHUB_OUTPUT
           echo "high=${HIGH}" >> $GITHUB_OUTPUT
           echo "medium=${MEDIUM}" >> $GITHUB_OUTPUT
-          LOW=$(jq '[.Issues[] | select(.severity == "LOW")] | length' gosec-report.json 2>/dev/null || echo "0")
           echo "low=${LOW}" >> $GITHUB_OUTPUT
+          echo "secrets=${SECRETS}" >> $GITHUB_OUTPUT
           
           echo ""
-          echo "🔬 ===== SAST (CODE) ISSUES SUMMARY ====="
-          echo "   Critical:      ${CRITICAL}"
-          echo "   High:          ${HIGH}"
-          echo "   Medium:        ${MEDIUM}"
-          echo "   Low:           ${LOW}"
+          echo "🔬 ===== SAST (CODE) ISSUES SUMMARY (Semgrep) ====="
+          echo "   Critical (ERROR):      ${CRITICAL}"
+          echo "   High (WARNING):        ${HIGH}"
+          echo "   Medium (INFO):         ${MEDIUM}"
+          echo "   Low (NOTE):            ${LOW}"
           echo "   --------------------------------"
-          echo "   Total:         ${TOTAL}"
+          echo "   Total Issues:          ${TOTAL}"
+          echo "🔐 ===== SECRET DETECTION (TruffleHog) ====="
+          echo "   Secrets Found:         ${SECRETS}"
           echo "========================================="
           echo ""
           
           # Show detailed issues if found
           if [ "$TOTAL" -gt 0 ]; then
             echo "🔍 Code Security Issues Detected:"
-            jq -r '.Issues[] | "  ⚠️  [\(.severity)] \(.rule_id): \(.details) (File: \(.file), Line: \(.line))"' gosec-report.json 2>/dev/null || echo "  (Unable to parse details)"
+            jq -r '.results[] | "  ⚠️  [\(.extra.severity)] \(.rule_id): \(.message) (File: \(.path), Line: \(.start.line))"' semgrep-report.json 2>/dev/null || echo "  (Unable to parse details)"
             echo ""
           else
             echo "✅ No code security issues detected"
+          fi
+          
+          if [ "$SECRETS" -gt 0 ]; then
+            echo "🔐 Secrets Detected:"
+            jq -r '.[] | "  ⚠️  \(.type): Found in \(.file_path)"' trufflehog-report.json 2>/dev/null || echo "  (Unable to parse details)"
+            echo ""
+          else
+            echo "✅ No secrets detected"
           fi
 
       - name: "💾 Upload Security Artifacts"
@@ -322,7 +355,8 @@ jobs:
           path: |
             bom.json
             vulnerabilities.json
-            gosec-report.json
+            semgrep-report.json
+            trufflehog-report.json
           retention-days: 90
 
   # ============================================
@@ -393,12 +427,14 @@ jobs:
           
           vuln = safe_load('vulnerabilities.json', {'matches': []})
           sbom = safe_load('bom.json', {'components': []})
-          sast = safe_load('gosec-report.json', {'Issues': []})
+          sast = safe_load('semgrep-report.json', {'results': []})
+          secrets = safe_load('trufflehog-report.json', [])
           
           input_data = {
               'vulnerabilities': vuln,
               'sbom': sbom,
               'sast': sast,
+              'secrets': secrets,
               'slsa_build': {
                   'level': 3,
                   'provenance_verified': True,
@@ -418,7 +454,8 @@ jobs:
           print(f"✅ OPA input created successfully")
           print(f"📊 Input Summary:")
           print(f"   - CVE Vulnerabilities: {len(vuln.get('matches', []))}")
-          print(f"   - SAST Issues: {len(sast.get('Issues', []))}")
+          print(f"   - SAST Issues: {len(sast.get('results', []))}")
+          print(f"   - Secrets Detected: {len(secrets)}")
           print(f"   - SBOM Components: {len(sbom.get('components', []))}")
           print(f"   - SLSA Level: {input_data['slsa_build']['level']}")
           PYEOF
@@ -617,13 +654,19 @@ jobs:
           | 🟢 Low | ${{ needs.scan-and-analyze.outputs.low_count || 0 }} |
           | **Total** | **${{ needs.scan-and-analyze.outputs.vulnerabilities_found || 0 }}** |
           
-          ## 🔬 Code Security Issues (SAST)
+          ## 🔬 Code Security Issues (SAST - Semgrep)
           | Severity | Count |
           |----------|-------|
-          | 🔴 Critical | ${{ needs.scan-and-analyze.outputs.sast_critical || 0 }} |
-          | 🟠 High | ${{ needs.scan-and-analyze.outputs.sast_high || 0 }} |
-          | 🟡 Medium | ${{ needs.scan-and-analyze.outputs.sast_medium || 0 }} |
+          | 🔴 Critical (ERROR) | ${{ needs.scan-and-analyze.outputs.sast_critical || 0 }} |
+          | 🟠 High (WARNING) | ${{ needs.scan-and-analyze.outputs.sast_high || 0 }} |
+          | 🟡 Medium (INFO) | ${{ needs.scan-and-analyze.outputs.sast_medium || 0 }} |
+          | 🟢 Low (NOTE) | ${{ needs.scan-and-analyze.outputs.sast_low || 0 }} |
           | **Total** | **${{ needs.scan-and-analyze.outputs.sast_issues_found || 0 }}** |
+          
+          ## 🔐 Secrets Detection (TruffleHog)
+          | Type | Count |
+          |------|-------|
+          | 🔑 Secrets Detected | ${{ needs.scan-and-analyze.outputs.secrets_found || 0 }} |
           
           ## 🛡️ Policy Enforcement
           - **Status:** ${{ needs.policy-enforcement.outputs.policy_result == 'true' && '✅ PASSED' || '❌ FAILED' }}
@@ -690,14 +733,19 @@ jobs:
           echo "| **Total** | **${{ needs.scan-and-analyze.outputs.vulnerabilities_found || 0 }}** |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
-          echo "### Code Security Issues (SAST)" >> $GITHUB_STEP_SUMMARY
+          echo "### Code Security Issues (SAST - Semgrep)" >> $GITHUB_STEP_SUMMARY
           echo "| Severity | Count |" >> $GITHUB_STEP_SUMMARY
           echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| 🔴 Critical | ${{ needs.scan-and-analyze.outputs.sast_critical || 0 }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🟠 High | ${{ needs.scan-and-analyze.outputs.sast_high || 0 }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🟡 Medium | ${{ needs.scan-and-analyze.outputs.sast_medium || 0 }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🟢 Low | ${{ needs.scan-and-analyze.outputs.sast_low || 0 }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🔴 Critical (ERROR) | ${{ needs.scan-and-analyze.outputs.sast_critical || 0 }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🟠 High (WARNING) | ${{ needs.scan-and-analyze.outputs.sast_high || 0 }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🟡 Medium (INFO) | ${{ needs.scan-and-analyze.outputs.sast_medium || 0 }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🟢 Low (NOTE) | ${{ needs.scan-and-analyze.outputs.sast_low || 0 }} |" >> $GITHUB_STEP_SUMMARY
           echo "| **Total** | **${{ needs.scan-and-analyze.outputs.sast_issues_found || 0 }}** |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Secrets Detection (TruffleHog)" >> $GITHUB_STEP_SUMMARY
+          echo "| Type | Count |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 🔐 Secrets Detected | ${{ needs.scan-and-analyze.outputs.secrets_found || 0 }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
           echo "## 🛡️ Policy Enforcement" >> $GITHUB_STEP_SUMMARY
