@@ -211,12 +211,15 @@ jobs:
           echo "image-ref=${IMAGE_REF}" >> $GITHUB_OUTPUT
           echo "✅ Image pulled successfully"
 
-      - name: "📦 Generate SBOM (Syft CycloneDX)"
-        uses: anchore/sbom-action@v0
-        with:
-          image: ${{ steps.image-info.outputs.image-ref }}
-          format: cyclonedx-json
-          output-file: bom.json
+      - name: "📦 Generate SBOM (Syft CycloneDX) - Direct"
+        run: |
+          echo "📦 Installing Syft directly (avoid artifact upload conflict)..."
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+          
+          echo "📦 Generating SBOM for signed image..."
+          syft "${{ steps.image-info.outputs.image-ref }}" -o cyclonedx-json > bom.json
+          
+          echo "✅ SBOM generated successfully"
 
       - name: "📈 Extract SBOM Statistics"
         id: sbom-stats
