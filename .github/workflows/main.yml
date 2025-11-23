@@ -278,8 +278,13 @@ jobs:
           python3 -m pip install --quiet semgrep
           
           echo "🔍 Running static code analysis on application (language-agnostic)..."
-          # Run Semgrep with performance optimizations
-          semgrep scan --config=p/security-audit --json --output=semgrep-report.json app/ \
+          # Run Semgrep with comprehensive rulesets to catch vulnerabilities
+          semgrep scan \
+            --config=p/security-audit \
+            --config=p/secrets \
+            --config=p/cwe-top-25 \
+            --config=p/owasp-top-ten \
+            --json --output=semgrep-report.json . \
             --max-workers=$(nproc) 2>&1 || true
           
           # Ensure the file exists with valid JSON
@@ -295,7 +300,7 @@ jobs:
           python3 -m pip install --quiet truffleHog
           
           echo "🔍 Scanning for hardcoded secrets..."
-          trufflehog filesystem app/ --json --max-workers=$(nproc) > trufflehog-report.json 2>&1 || true
+          trufflehog filesystem . --json --max-workers=$(nproc) > trufflehog-report.json 2>&1 || true
           
           # Ensure the file exists with valid JSON
           if [ ! -f trufflehog-report.json ]; then
@@ -432,39 +437,6 @@ jobs:
         run: |
           echo "📝 Creating OPA input with all scan results..."
           
-          # Use Python to safely create the input JSON
-          python3 << 'PYEOF'
-          import json
-          import sys
-          
-          def safe_load(filename, default):
-              try:
-                  with open(filename, 'r') as f:
-                      return json.load(f)
-              except Exception as e:
-                  print(f"Warning: Could not load {filename}: {e}", file=sys.stderr)
-                  return default
-          
-          vuln = safe_load('vulnerabilities.json', {'matches': []})
-          sbom = safe_load('bom.json', {'components': []})
-          sast = safe_load('semgrep-report.json', {'results': []})
-          secrets = safe_load('trufflehog-report.json', [])
-          
-          input_data = {
-              'vulnerabilities': vuln,
-              'sbom': sbom,
-              'sast': sast,
-              'secrets': secrets,
-              'slsa_build': {
-                  'level': 3,
-                  'provenance_verified': True,
-                  'hermetic_build': True,
-                  'signed': True
-              },
-              'metadata': {
-                  'version': '${{ needs.prepare.outputs.version }}',
-                  'commit_sha': '${{ github.sha }}',
-                  'pipeline_run': '${{ github.run_number }}'
               }
           }
           

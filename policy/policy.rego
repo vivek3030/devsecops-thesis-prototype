@@ -1,17 +1,3 @@
-package main
-
-# Top-level allow rule
-allow if {
-    slsa_level_ok
-    sbom_attached
-    no_critical_cve
-    no_critical_sast
-}
-
-# ---------------------------
-# SLSA Level
-# ---------------------------
-slsa_level_ok if {
     input.slsa_build.level >= 3
     input.slsa_build.provenance_verified
     input.slsa_build.hermetic_build
@@ -37,18 +23,25 @@ no_high_cve if {
 }
 
 # ---------------------------
-# SAST Checks
+# SAST Checks (Semgrep Format)
 # ---------------------------
 no_critical_sast if {
-    count([i | i := input.sast.Issues[_]; i.severity == "HIGH"]) == 0
+    count([r | r := input.sast.results[_]; r.extra.severity == "ERROR"]) == 0
 }
 
 no_high_sast if {
-    count([i | i := input.sast.Issues[_]; i.severity == "MEDIUM"]) == 0
+    count([r | r := input.sast.results[_]; r.extra.severity == "WARNING"]) == 0
 }
 
 # ---------------------------
-# Deny rules (partial set)
+# Secret Detection Check
+# ---------------------------
+no_secrets_detected if {
+    count(input.secrets) == 0
+}
+
+# ---------------------------
+# Deny rules (blocking conditions)
 # ---------------------------
 deny contains {"type": "SLSA", "msg": "SLSA level requirement not satisfied"} if {
     not slsa_level_ok
@@ -65,9 +58,20 @@ deny contains {"type": "CVE", "msg": msg} if {
 }
 
 deny contains {"type": "SAST", "msg": msg} if {
-    i := input.sast.Issues[_]
-    i.severity == "HIGH"
-    msg := sprintf("Critical SAST issue found: %v at line %v", [i.rule_id, i.line])
+    r := input.sast.results[_]
+    r.extra.severity == "ERROR"
+    msg := sprintf("Critical SAST issue found: %v at line %v", [r.rule_id, r.start.line])
+}
+
+deny contains {"type": "SAST", "msg": msg} if {
+    r := input.sast.results[_]
+    r.extra.severity == "WARNING"
+    msg := sprintf("High SAST issue found: %v at line %v", [r.rule_id, r.start.line])
+}
+
+deny contains {"type": "SECRET", "msg": msg} if {
+    s := input.secrets[_]
+    msg := sprintf("Hardcoded secret detected: %v in %v", [s.type, s.file_path])
 }
 
 # ---------------------------
