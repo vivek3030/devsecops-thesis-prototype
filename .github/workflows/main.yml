@@ -247,130 +247,64 @@ jobs:
           HIGH=$(jq '[.matches[] | select(.vulnerability.severity == "High")] | length' vulnerabilities.json 2>/dev/null || echo "0")
           MEDIUM=$(jq '[.matches[] | select(.vulnerability.severity == "Medium")] | length' vulnerabilities.json 2>/dev/null || echo "0")
           LOW=$(jq '[.matches[] | select(.vulnerability.severity == "Low")] | length' vulnerabilities.json 2>/dev/null || echo "0")
-          
-          echo "total=${TOTAL}" >> $GITHUB_OUTPUT
-          echo "critical=${CRITICAL}" >> $GITHUB_OUTPUT
-          echo "high=${HIGH}" >> $GITHUB_OUTPUT
-          echo "medium=${MEDIUM}" >> $GITHUB_OUTPUT
-          echo "low=${LOW}" >> $GITHUB_OUTPUT
-          
-          echo ""
-          echo "🔍 ===== CVE VULNERABILITY SUMMARY ====="
-          echo "   Critical: ${CRITICAL}"
-          echo "   High:     ${HIGH}"
-          echo "   Medium:   ${MEDIUM}"
-          echo "   Low:      ${LOW}"
-          echo "   --------------------------------"
-          echo "   Total:    ${TOTAL}"
-          echo "========================================"
 
-      - name: "⚡ Cache Python Dependencies"
-        uses: actions/cache@v3
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: "🔬 Static Application Security Testing (SAST) - Semgrep"
+      - name: "🔬 SAST Scan (Semgrep)"
         run: |
-          echo "🔬 Installing Semgrep for multi-language code analysis..."
-          python3 -m pip install --quiet semgrep
+          echo "🔬 Installing Semgrep..."
+          python3 -m pip install semgrep
           
-          echo "🔍 Running static code analysis on application (language-agnostic)..."
-          # Run Semgrep with comprehensive rulesets to catch vulnerabilities
-          semgrep scan \
-            --config=p/security-audit \
-            --config=p/secrets \
-            --config=p/cwe-top-25 \
-            --config=p/owasp-top-ten \
-            --json --output=semgrep-report.json . \
-            --max-workers=$(nproc) 2>&1 || true
-          
-          # Ensure the file exists with valid JSON
-          if [ ! -f semgrep-report.json ]; then
-          fi
-          
-          echo "✅ Secret scan complete"
+          echo "🔬 Running Semgrep SAST scan..."
+          semgrep scan --config=auto --json --output=semgrep.json || true
+          echo "✅ Semgrep scan complete"
 
-      - name: "📊 Extract SAST Statistics"
+      - name: "🔐 Secret Scanning (TruffleHog)"
+        run: |
+          echo "🔐 Installing TruffleHog..."
+          curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin
+          
+          echo "🔐 Running TruffleHog secret scan..."
+          trufflehog filesystem . --json > trufflehog.json || true
+          echo "✅ TruffleHog scan complete"
+
+      - name: "📊 Extract SAST & Secret Statistics"
         id: sast-stats
         run: |
           echo "📊 Analyzing SAST results..."
           
-          # Check if files exist and have content
-          if [ ! -f semgrep-report.json ] || [ ! -s semgrep-report.json ]; then
-            echo "⚠️ No Semgrep report generated or file is empty"
-            echo '{"results": []}' > semgrep-report.json
+          # Semgrep Stats
+          if [ -f semgrep.json ]; then
+            SAST_TOTAL=$(jq '.results | length' semgrep.json 2>/dev/null || echo "0")
+            SAST_CRITICAL=$(jq '[.results[] | select(.extra.severity == "ERROR")] | length' semgrep.json 2>/dev/null || echo "0")
+            SAST_HIGH=$(jq '[.results[] | select(.extra.severity == "WARNING")] | length' semgrep.json 2>/dev/null || echo "0")
+            SAST_MEDIUM=$(jq '[.results[] | select(.extra.severity == "INFO")] | length' semgrep.json 2>/dev/null || echo "0")
+            SAST_LOW=$(jq '[.results[] | select(.extra.severity == "NOTE")] | length' semgrep.json 2>/dev/null || echo "0")
+          else
+            echo "⚠️ semgrep.json not found"
+            SAST_TOTAL=0
+            SAST_CRITICAL=0
+            SAST_HIGH=0
+            SAST_MEDIUM=0
+            SAST_LOW=0
           fi
           
-          if [ ! -f trufflehog-report.json ] || [ ! -s trufflehog-report.json ]; then
-            echo "⚠️ No TruffleHog report generated or file is empty"
-            echo '[]' > trufflehog-report.json
+          # TruffleHog Stats
+          if [ -f trufflehog.json ]; then
+            # TruffleHog JSON output is one JSON object per line, so we count lines
+            SECRETS=$(wc -l < trufflehog.json || echo "0")
+          else
+            echo "⚠️ trufflehog.json not found"
+            SECRETS=0
           fi
           
-          # Extract Semgrep issue counts by severity
-          TOTAL=$(jq '.results | length' semgrep-report.json 2>/dev/null || echo "0")
-          CRITICAL=$(jq '[.results[] | select(.extra.severity == "ERROR")] | length' semgrep-report.json 2>/dev/null || echo "0")
-          HIGH=$(jq '[.results[] | select(.extra.severity == "WARNING")] | length' semgrep-report.json 2>/dev/null || echo "0")
-          MEDIUM=$(jq '[.results[] | select(.extra.severity == "INFO")] | length' semgrep-report.json 2>/dev/null || echo "0")
-          LOW=$(jq '[.results[] | select(.extra.severity == "NOTE")] | length' semgrep-report.json 2>/dev/null || echo "0")
-          
-          # Count secrets found
-          SECRETS=$(jq '. | length' trufflehog-report.json 2>/dev/null || echo "0")
-          
-          echo "total=${TOTAL}" >> $GITHUB_OUTPUT
-          echo "critical=${CRITICAL}" >> $GITHUB_OUTPUT
-          echo "high=${HIGH}" >> $GITHUB_OUTPUT
-          echo "medium=${MEDIUM}" >> $GITHUB_OUTPUT
-          echo "low=${LOW}" >> $GITHUB_OUTPUT
+          echo "total=${SAST_TOTAL}" >> $GITHUB_OUTPUT
+          echo "critical=${SAST_CRITICAL}" >> $GITHUB_OUTPUT
+          echo "high=${SAST_HIGH}" >> $GITHUB_OUTPUT
+          echo "medium=${SAST_MEDIUM}" >> $GITHUB_OUTPUT
+          echo "low=${SAST_LOW}" >> $GITHUB_OUTPUT
           echo "secrets=${SECRETS}" >> $GITHUB_OUTPUT
           
-          echo ""
-          echo "🔬 ===== SAST (CODE) ISSUES SUMMARY (Semgrep) ====="
-          echo "   Critical (ERROR):      ${CRITICAL}"
-          echo "   High (WARNING):        ${HIGH}"
-          echo "   Medium (INFO):         ${MEDIUM}"
-          echo "   Low (NOTE):            ${LOW}"
-          echo "   --------------------------------"
-          echo "   Total Issues:          ${TOTAL}"
-          echo "🔐 ===== SECRET DETECTION (TruffleHog) ====="
-          echo "   Secrets Found:         ${SECRETS}"
-          echo "========================================="
-          echo ""
-          
-          # Show detailed issues if found
-          if [ "$TOTAL" -gt 0 ]; then
-            echo "🔍 Code Security Issues Detected:"
-            jq -r '.results[] | "  ⚠️  [\(.extra.severity)] \(.rule_id): \(.message) (File: \(.path), Line: \(.start.line))"' semgrep-report.json 2>/dev/null || echo "  (Unable to parse details)"
-            echo ""
-          else
-            echo "✅ No code security issues detected"
-          fi
-          
-          if [ "$SECRETS" -gt 0 ]; then
-            echo "🔐 Secrets Detected:"
-            jq -r '.[] | "  ⚠️  \(.type): Found in \(.file_path)"' trufflehog-report.json 2>/dev/null || echo "  (Unable to parse details)"
-            echo ""
-          else
-            echo "✅ No secrets detected"
-          fi
-
-      - name: "💾 Upload Security Artifacts"
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: sbom-and-vulnerabilities
-          path: |
-            bom.json
-            vulnerabilities.json
-            semgrep-report.json
-            trufflehog-report.json
-          retention-days: 90
-
-  # ============================================
-  # Stage 4: Security Policy Enforcement (OPA)
-  # ============================================
+          echo "🔬 SAST Issues: ${SAST_TOTAL} (Crit: ${SAST_CRITICAL}, High: ${SAST_HIGH})"
+          echo "🔐 Secrets Found: ${SECRETS}"
   policy-enforcement:
     name: "4️⃣ Security Policy Enforcement (OPA)"
     runs-on: ubuntu-latest
