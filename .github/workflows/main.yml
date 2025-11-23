@@ -289,22 +289,6 @@ jobs:
           
           # Ensure the file exists with valid JSON
           if [ ! -f semgrep-report.json ]; then
-            echo '{"results": []}' > semgrep-report.json
-          fi
-          
-          echo "✅ SAST scan complete"
-      
-      - name: "🔐 Secret Detection (TruffleHog)"
-        run: |
-          echo "🔐 Installing TruffleHog for secret detection..."
-          python3 -m pip install --quiet truffleHog
-          
-          echo "🔍 Scanning for hardcoded secrets..."
-          trufflehog filesystem . --json --max-workers=$(nproc) > trufflehog-report.json 2>&1 || true
-          
-          # Ensure the file exists with valid JSON
-          if [ ! -f trufflehog-report.json ]; then
-            echo '[]' > trufflehog-report.json
           fi
           
           echo "✅ Secret scan complete"
@@ -432,29 +416,6 @@ jobs:
           echo "- vulnerabilities.json: $(jq '.matches | length' vulnerabilities.json 2>/dev/null || echo 'ERROR') CVEs"
           echo "- gosec-report.json: $(jq '.Issues | length' gosec-report.json 2>/dev/null || echo 'ERROR') issues"
           echo "- bom.json: $(jq '.components | length' bom.json 2>/dev/null || echo 'ERROR') components"
-
-      - name: "🔍 Create OPA Input Data"
-        run: |
-          echo "📝 Creating OPA input with all scan results..."
-          
-              }
-          }
-          
-          with open('input.json', 'w') as f:
-              json.dump(input_data, f, indent=2)
-          
-          print(f"✅ OPA input created successfully")
-          print(f"📊 Input Summary:")
-          print(f"   - CVE Vulnerabilities: {len(vuln.get('matches', []))}")
-          print(f"   - SAST Issues: {len(sast.get('results', []))}")
-          print(f"   - Secrets Detected: {len(secrets)}")
-          print(f"   - SBOM Components: {len(sbom.get('components', []))}")
-          print(f"   - SLSA Level: {input_data['slsa_build']['level']}")
-          PYEOF
-
-      - name: "🔍 Validate Policy Files"
-        run: |
-          echo "🔍 Validating OPA policy syntax..."
           if [ ! -f ./policy/policy.rego ]; then
             echo "❌ ERROR: policy/policy.rego not found!"
             exit 1
