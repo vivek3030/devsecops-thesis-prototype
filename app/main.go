@@ -2,17 +2,17 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -80,36 +80,56 @@ func versionHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ---------- VULNERABLE CODE START ----------
-
-// G101: Hardcoded credentials
-const apiKey = "AKIAIOSFODNN7EXAMPLE"
-
-// G404: Insecure random (misused later)
-func insecureToken() string {
-	b := make([]byte, 8)
-	rand.Read(b)
-	return fmt.Sprintf("%x", b)[:8]
-}
-
-// G305: Path traversal risk
+// fileHandler safely serves files from the data directory.
 func fileHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	file := vars["file"]
-	// No sanitization → attacker can request /files/../../../etc/passwd
-	data, _ := ioutil.ReadFile("/data/" + file) // G104: error ignored
+
+	// Sanitize the file path
+	cleanPath := filepath.Clean(file)
+
+	// Prevent path traversal
+	if strings.Contains(cleanPath, "..") || strings.HasPrefix(cleanPath, "/") || strings.HasPrefix(cleanPath, "\\") {
+		http.Error(w, "Invalid filename", http.StatusBadRequest)
+		return
+	}
+
+	// Construct full path relative to a safe directory
+	baseDir := "./data"
+	fullPath := filepath.Join(baseDir, cleanPath)
+
+	// Verify the path is within the base directory
+	absBase, err := filepath.Abs(baseDir)
+	if err != nil {
+		log.Printf("error resolving base dir: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	absPath, err := filepath.Abs(fullPath)
+	if err != nil {
+		log.Printf("error resolving file path: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	if !strings.HasPrefix(absPath, absBase) {
+		http.Error(w, "Access denied", http.StatusForbidden)
+		return
+	}
+
+	// Read and serve the file
+	data, err := os.ReadFile(fullPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			http.Error(w, "File not found", http.StatusNotFound)
+		} else {
+			log.Printf("error reading file: %v", err)
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+		}
+		return
+	}
 	w.Write(data)
 }
-
-// G104: Error swallowing
-func doSomething() {
-	_, err := os.Open("/nonexistent")
-	if err != nil {
-		// ignored
-	}
-}
-
-// ---------- VULNERABLE CODE END ----------
 
 func main() {
 	// Flags
@@ -134,7 +154,7 @@ func main() {
 		fmt.Println("  GET /health     - Health check")
 		fmt.Println("  GET /ready      - Readiness")
 		fmt.Println("  GET /version    - Version info")
-		fmt.Println("  GET /files/{f}  - VULNERABLE file endpoint")
+		fmt.Println("  GET /files/{f}  - Safe file endpoint")
 		os.Exit(0)
 	}
 
@@ -154,10 +174,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Trigger Gosec findings at startup
-	_ = insecureToken()
-	doSomething()
-
 	// Router
 	r := mux.NewRouter()
 	r.Use(securityHeadersMiddleware)
@@ -165,7 +181,7 @@ func main() {
 	r.HandleFunc("/health", healthHandler).Methods("GET")
 	r.HandleFunc("/ready", readyHandler).Methods("GET")
 	r.HandleFunc("/version", versionHandler).Methods("GET")
-	r.HandleFunc("/files/{file}", fileHandler).Methods("GET") // VULNERABLE
+	r.HandleFunc("/files/{file}", fileHandler).Methods("GET")
 
 	srv := &http.Server{
 		Handler:      r,
