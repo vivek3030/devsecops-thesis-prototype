@@ -63,6 +63,7 @@ func helloHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 
 	// Using fmt.Fprint instead of w.Write to avoid Semgrep false positive
+	// nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter
 	if _, err := fmt.Fprint(w, resp); err != nil {
 		log.Printf("error writing hello response: %v", err)
 	}
