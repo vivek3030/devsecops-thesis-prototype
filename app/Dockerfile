@@ -1,17 +1,9 @@
 # ==============================================================================
 # SLSA L3 Secure Dockerfile
 # ==============================================================================
-# Security Features:
-# - Multi-stage build (minimal final image)
-# - Chainguard distroless base (no shell, no package manager)
-# - Non-root user (UID 65532)
-# - Static binary (CGO_ENABLED=0)
-# - Dependency verification (go mod verify)
-# - Pinned base images for reproducibility
-# ==============================================================================
 
 # --- Build Stage ---
-FROM cgr.dev/chainguard/go:1.23@sha256:latest AS build
+FROM cgr.dev/chainguard/go:1.23-dev AS build
 
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
@@ -46,7 +38,7 @@ RUN file /app/server | grep "statically linked" || \
   (echo "ERROR: Binary is not statically linked!" && exit 1)
 
 # --- Final Stage ---
-FROM cgr.dev/chainguard/static:latest@sha256:latest
+FROM cgr.dev/chainguard/static:latest
 
 ARG VERSION=dev
 ARG BUILD_DATE
@@ -80,10 +72,6 @@ EXPOSE 8080/tcp
 ENV GODEBUG=madvdontneed=1 \
   TZ=UTC \
   PORT=8080
-
-# Health check (optional, comment out if not needed)
-# HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-#   CMD ["/usr/local/bin/server", "-health"] || exit 1
 
 # Use exec form for proper signal handling
 ENTRYPOINT ["/usr/local/bin/server"]
