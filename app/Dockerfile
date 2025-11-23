@@ -3,7 +3,7 @@
 # ==============================================================================
 
 # --- Build Stage ---
-FROM cgr.dev/chainguard/go:1.23-dev AS build
+FROM cgr.dev/chainguard/go:latest-dev AS build
 
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
