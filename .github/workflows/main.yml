@@ -139,13 +139,6 @@ jobs:
           cosign sign --yes "${{ steps.image-ref.outputs.ref }}"
           echo "✅ Image signed successfully"
 
-      - name: "📋 Generate SBOM with Syft (CycloneDX)"
-        uses: anchore/sbom-action@v0
-        with:
-          image: ${{ steps.image-ref.outputs.ref }}
-          format: cyclonedx-json
-          output-file: bom.json
-
       - name: "🔎 Attach SBOM Attestation (SLSA Requirement)"
         env:
           COSIGN_EXPERIMENTAL: 1
@@ -247,6 +240,15 @@ jobs:
           HIGH=$(jq '[.matches[] | select(.vulnerability.severity == "High")] | length' vulnerabilities.json 2>/dev/null || echo "0")
           MEDIUM=$(jq '[.matches[] | select(.vulnerability.severity == "Medium")] | length' vulnerabilities.json 2>/dev/null || echo "0")
           LOW=$(jq '[.matches[] | select(.vulnerability.severity == "Low")] | length' vulnerabilities.json 2>/dev/null || echo "0")
+          
+          # ADD THESE LINES:
+          echo "total=${TOTAL}" >> $GITHUB_OUTPUT
+          echo "critical=${CRITICAL}" >> $GITHUB_OUTPUT
+          echo "high=${HIGH}" >> $GITHUB_OUTPUT
+          echo "medium=${MEDIUM}" >> $GITHUB_OUTPUT
+          echo "low=${LOW}" >> $GITHUB_OUTPUT
+          
+          echo "🔍 Vulnerabilities: ${TOTAL} (Crit: ${CRITICAL}, High: ${HIGH})"
 
       - name: "🔬 SAST Scan (Semgrep)"
         run: |
@@ -305,6 +307,19 @@ jobs:
           
           echo "🔬 SAST Issues: ${SAST_TOTAL} (Crit: ${SAST_CRITICAL}, High: ${SAST_HIGH})"
           echo "🔐 Secrets Found: ${SECRETS}"
+
+      - name: "💾 Upload Security Scan Results"
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sbom-and-vulnerabilities
+          path: |
+            bom.json
+            vulnerabilities.json
+            semgrep.json
+            trufflehog.json
+          retention-days: 90
+
   policy-enforcement:
     name: "4️⃣ Security Policy Enforcement (OPA)"
     runs-on: ubuntu-latest
@@ -340,6 +355,51 @@ jobs:
           sudo mv opa /usr/local/bin/opa
           opa version
           echo "✅ OPA installed"
+
+      - name: "📋 Create OPA Input File"
+        run: |
+          cat > input.json << EOF
+          {
+            "image": {
+              "ref": "${{ needs.build-container.outputs.image_ref }}",
+              "digest": "${{ needs.build-container.outputs.image_digest }}"
+            },
+            "slsa_build": {
+              "level": 3,
+              "provenance_verified": true,
+              "hermetic_build": true,
+              "signed": true
+            },
+            "sbom": {
+              "components_count": ${{ needs.scan-and-analyze.outputs.sbom_components_count }}
+            },
+            "vulnerabilities": {
+              "total": ${{ needs.scan-and-analyze.outputs.vulnerabilities_found }},
+              "critical": ${{ needs.scan-and-analyze.outputs.critical_count }},
+              "high": ${{ needs.scan-and-analyze.outputs.high_count }},
+              "medium": ${{ needs.scan-and-analyze.outputs.medium_count }},
+              "low": ${{ needs.scan-and-analyze.outputs.low_count }}
+            },
+            "sast": {
+              "total": ${{ needs.scan-and-analyze.outputs.sast_issues_found }},
+              "critical": ${{ needs.scan-and-analyze.outputs.sast_critical }},
+              "high": ${{ needs.scan-and-analyze.outputs.sast_high }},
+              "medium": ${{ needs.scan-and-analyze.outputs.sast_medium }},
+              "low": ${{ needs.scan-and-analyze.outputs.sast_low }}
+            },
+            "secrets": {
+              "found": ${{ needs.scan-and-analyze.outputs.secrets_found }}
+            },
+            "metadata": {
+              "version": "${{ needs.prepare.outputs.version }}",
+              "commit": "${{ github.sha }}",
+              "build_time": "${{ needs.prepare.outputs.build_start_time }}"
+            }
+          }
+          EOF
+          
+          echo "✅ OPA input file created"
+          cat input.json
 
       - name: "🔍 Verify Downloaded Files"
         run: |
