@@ -341,17 +341,18 @@ jobs:
           
           echo "🔬 SAST Issues: ${SAST_TOTAL} (Crit: ${SAST_CRITICAL}, High: ${SAST_HIGH})"
           echo "🔐 Verified Secrets: ${SECRETS}"
-            - name: "💾 Upload Security Scan Results"
-              uses: actions/upload-artifact@v4
-              if: always()
-              with:
-                name: sbom-and-vulnerabilities
-                path: |
-                  bom.json
-                  vulnerabilities.json
-                  semgrep.json
-                  trufflehog.json
-                retention-days: 90
+        
+      - name: "💾 Upload Security Scan Results"
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sbom-and-vulnerabilities
+          path: |
+            bom.json
+            vulnerabilities.json
+            semgrep.json
+            trufflehog.json
+          retention-days: 90
 
   policy-enforcement:
     name: "4️⃣ Security Policy Enforcement (OPA)"
