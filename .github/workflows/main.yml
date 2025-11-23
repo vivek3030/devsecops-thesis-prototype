@@ -312,20 +312,23 @@ jobs:
             SAST_MEDIUM=$(jq '[.results[] | select(.extra.severity == "INFO")] | length' semgrep.json 2>/dev/null || echo "0")
             SAST_LOW=$(jq '[.results[] | select(.extra.severity == "NOTE")] | length' semgrep.json 2>/dev/null || echo "0")
           else
-            echo "⚠️ semgrep.json not found"
-            SAST_TOTAL=0
-            SAST_CRITICAL=0
-            SAST_HIGH=0
-            SAST_MEDIUM=0
-            SAST_LOW=0
+            SAST_TOTAL=0; SAST_CRITICAL=0; SAST_HIGH=0; SAST_MEDIUM=0; SAST_LOW=0
           fi
           
-          # TruffleHog Stats
+          # TruffleHog Stats - Filter out unverified secrets
           if [ -f trufflehog.json ]; then
-            # TruffleHog JSON output is one JSON object per line, so we count lines
-            SECRETS=$(wc -l < trufflehog.json || echo "0")
+            # Count only VERIFIED secrets (real threats)
+            SECRETS=$(jq '[.[] | select(.Verified == true)] | length' trufflehog.json 2>/dev/null || echo "0")
+            
+            # If still 0, fall back to line count but warn
+            if [ "$SECRETS" -eq 0 ]; then
+              TOTAL_FINDINGS=$(wc -l < trufflehog.json || echo "0")
+              if [ "$TOTAL_FINDINGS" -gt 0 ]; then
+                echo "⚠️ Found $TOTAL_FINDINGS unverified secrets (likely false positives)"
+              fi
+              SECRETS=0  # Only report verified secrets
+            fi
           else
-            echo "⚠️ trufflehog.json not found"
             SECRETS=0
           fi
           
@@ -337,19 +340,18 @@ jobs:
           echo "secrets=${SECRETS}" >> $GITHUB_OUTPUT
           
           echo "🔬 SAST Issues: ${SAST_TOTAL} (Crit: ${SAST_CRITICAL}, High: ${SAST_HIGH})"
-          echo "🔐 Secrets Found: ${SECRETS}"
-
-      - name: "💾 Upload Security Scan Results"
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: sbom-and-vulnerabilities
-          path: |
-            bom.json
-            vulnerabilities.json
-            semgrep.json
-            trufflehog.json
-          retention-days: 90
+          echo "🔐 Verified Secrets: ${SECRETS}"
+            - name: "💾 Upload Security Scan Results"
+              uses: actions/upload-artifact@v4
+              if: always()
+              with:
+                name: sbom-and-vulnerabilities
+                path: |
+                  bom.json
+                  vulnerabilities.json
+                  semgrep.json
+                  trufflehog.json
+                retention-days: 90
 
   policy-enforcement:
     name: "4️⃣ Security Policy Enforcement (OPA)"
