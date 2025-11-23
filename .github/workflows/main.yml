@@ -139,13 +139,40 @@ jobs:
           cosign sign --yes "${{ steps.image-ref.outputs.ref }}"
           echo "✅ Image signed successfully"
 
+      - name: "📋 Generate SBOM with Syft"
+        run: |
+          echo "📦 Installing Syft..."
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+          
+          echo "📦 Generating SBOM for image: ${{ steps.image-ref.outputs.ref }}"
+          syft "${{ steps.image-ref.outputs.ref }}" -o cyclonedx-json > bom.json
+          
+          echo "✅ SBOM generated successfully"
+          echo "📊 SBOM size: $(wc -c < bom.json) bytes"
+          echo "📦 Components: $(jq '.components | length' bom.json 2>/dev/null || echo 'N/A')"
+
       - name: "🔎 Attach SBOM Attestation (SLSA Requirement)"
         env:
           COSIGN_EXPERIMENTAL: 1
         run: |
+          if [ ! -f bom.json ]; then
+            echo "❌ ERROR: bom.json not found!"
+            echo "Current directory: $(pwd)"
+            echo "Files present:"
+            ls -la
+            exit 1
+          fi
+          
           echo "📋 Attaching SBOM attestation..."
           cosign attest --yes --type cyclonedx --predicate bom.json "${{ steps.image-ref.outputs.ref }}"
           echo "✅ SBOM attestation attached"
+
+      - name: "💾 Upload SBOM Artifact"
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: bom.json
+          retention-days: 90
 
       - name: "🔐 Verify Signature (SLSA L3 Verification)"
         env:
