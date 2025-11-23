@@ -51,11 +51,14 @@ func securityHeadersMiddleware(next http.Handler) http.Handler {
 }
 
 // helloHandler responds with an info message.
+// FIXED: Added Content-Type header to prevent XSS
 func helloHandler(w http.ResponseWriter, r *http.Request) {
 	resp := fmt.Sprintf(
 		"Hello, secure world! This is the SLSA L3 test application.\n\nVersion: %s\nBuild Date: %s\nCommit: %s",
 		Version, BuildDate, VCSRef,
 	)
+	// Set Content-Type to text/plain to prevent HTML injection
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	if _, err := w.Write([]byte(resp)); err != nil {
 		log.Printf("error writing hello response: %v", err)
 	}
@@ -81,6 +84,7 @@ func versionHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // fileHandler safely serves files from the data directory.
+// FIXED: Added proper Content-Type detection to prevent XSS
 func fileHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	file := vars["file"]
@@ -128,7 +132,23 @@ func fileHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	w.Write(data)
+
+	// SECURITY FIX: Detect and set proper Content-Type
+	// This prevents browsers from interpreting files as HTML/JS
+	contentType := http.DetectContentType(data)
+
+	// For text files, force plain text to prevent XSS
+	if strings.HasPrefix(contentType, "text/html") ||
+		strings.HasPrefix(contentType, "application/javascript") {
+		contentType = "text/plain; charset=utf-8"
+	}
+
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+
+	if _, err := w.Write(data); err != nil {
+		log.Printf("error writing file response: %v", err)
+	}
 }
 
 func main() {

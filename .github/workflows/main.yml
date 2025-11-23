@@ -255,7 +255,7 @@ jobs:
           curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
           echo "🔍 Scanning SBOM for known CVEs (with caching)..."
           # Use cached database for faster scanning
-          grype sbom:bom.json -o json --max-workers=$(nproc) > vulnerabilities.json || echo '{"matches": []}' > vulnerabilities.json
+          grype sbom:bom.json -o json > vulnerabilities.json || echo '{"matches": []}' > vulnerabilities.json
           echo "✅ CVE vulnerability scan complete"
 
       - name: "📉 Extract CVE Vulnerability Statistics"
