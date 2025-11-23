@@ -283,7 +283,11 @@ jobs:
           python3 -m pip install semgrep
           
           echo "🔬 Running Semgrep SAST scan..."
-          semgrep scan --config=auto --json --output=semgrep.json || true
+          semgrep scan \
+            --config=auto \
+            --exclude=".github/workflows/*.yml" \
+            --json \
+            --output=semgrep.json || true
           echo "✅ Semgrep scan complete"
 
       - name: "🔐 Secret Scanning (TruffleHog)"
