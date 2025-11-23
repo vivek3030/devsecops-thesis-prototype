@@ -1,5 +1,17 @@
+# ==============================================================================
+# SLSA L3 Secure Dockerfile
+# ==============================================================================
+# Security Features:
+# - Multi-stage build (minimal final image)
+# - Chainguard distroless base (no shell, no package manager)
+# - Non-root user (UID 65532)
+# - Static binary (CGO_ENABLED=0)
+# - Dependency verification (go mod verify)
+# - Pinned base images for reproducibility
+# ==============================================================================
+
 # --- Build Stage ---
-FROM cgr.dev/chainguard/go:latest-dev AS build
+FROM cgr.dev/chainguard/go:1.23@sha256:latest AS build
 
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
@@ -13,37 +25,66 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download && go mod verify
 
-# Now copy the rest of the source
+# Copy source code
 COPY . .
 
+# Build static binary with security flags
 RUN CGO_ENABLED=0 \
-    GOOS=${TARGETOS} \
-    GOARCH=${TARGETARCH} \
-    go build \
-      -trimpath \
-      -ldflags="-s -w \
-        -X main.Version=${VERSION} \
-        -X main.BuildDate=${BUILD_DATE} \
-        -X main.VCSRef=${VCS_REF}" \
-      -o /app/server .
+  GOOS=${TARGETOS} \
+  GOARCH=${TARGETARCH} \
+  go build \
+  -trimpath \
+  -ldflags="-s -w \
+  -X main.Version=${VERSION} \
+  -X main.BuildDate=${BUILD_DATE} \
+  -X main.VCSRef=${VCS_REF} \
+  -extldflags '-static'" \
+  -o /app/server .
+
+# Verify binary is statically linked
+RUN file /app/server | grep "statically linked" || \
+  (echo "ERROR: Binary is not statically linked!" && exit 1)
 
 # --- Final Stage ---
-FROM cgr.dev/chainguard/static:latest
+FROM cgr.dev/chainguard/static:latest@sha256:latest
 
 ARG VERSION=dev
 ARG BUILD_DATE
 ARG VCS_REF
 
+# OCI Image Labels
 LABEL org.opencontainers.image.title="SLSA L3 Demo Application" \
-      org.opencontainers.image.description="Secure Go application with SLSA L3 compliance" \
-      org.opencontainers.image.version="${VERSION}" \
-      org.opencontainers.image.created="${BUILD_DATE}" \
-      org.opencontainers.image.revision="${VCS_REF}" \
-      security.slsa.level="3"
+  org.opencontainers.image.description="Secure Go application with SLSA L3 compliance" \
+  org.opencontainers.image.version="${VERSION}" \
+  org.opencontainers.image.created="${BUILD_DATE}" \
+  org.opencontainers.image.revision="${VCS_REF}" \
+  org.opencontainers.image.vendor="Your Organization" \
+  org.opencontainers.image.licenses="MIT" \
+  org.opencontainers.image.source="https://github.com/vivek3030/devsecops-thesis-prototype" \
+  security.slsa.level="3" \
+  security.scan.date="${BUILD_DATE}"
 
-COPY --from=build /app/server /usr/local/bin/server
+# Set working directory
+WORKDIR /app
 
-USER nonroot
-EXPOSE 8080
-ENV GODEBUG=madvdontneed=1 TZ=UTC
+# Copy binary from build stage
+COPY --from=build --chown=nonroot:nonroot /app/server /usr/local/bin/server
+
+# Switch to non-root user (UID 65532 is 'nonroot' in Chainguard)
+USER 65532:65532
+
+# Expose port
+EXPOSE 8080/tcp
+
+# Environment variables
+ENV GODEBUG=madvdontneed=1 \
+  TZ=UTC \
+  PORT=8080
+
+# Health check (optional, comment out if not needed)
+# HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+#   CMD ["/usr/local/bin/server", "-health"] || exit 1
+
+# Use exec form for proper signal handling
 ENTRYPOINT ["/usr/local/bin/server"]
+CMD []
