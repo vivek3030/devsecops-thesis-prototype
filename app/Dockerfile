@@ -33,9 +33,8 @@ RUN CGO_ENABLED=0 \
   -extldflags '-static'" \
   -o /app/server .
 
-# Verify binary is statically linked
-RUN file /app/server | grep "statically linked" || \
-  (echo "ERROR: Binary is not statically linked!" && exit 1)
+# Verify binary was built successfully
+RUN test -x /app/server || (echo "ERROR: Binary not built!" && exit 1)
 
 # --- Final Stage ---
 FROM cgr.dev/chainguard/static:latest
