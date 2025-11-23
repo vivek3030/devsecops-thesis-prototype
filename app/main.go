@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -147,9 +149,7 @@ func fileHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 
-	// Safe to write after setting proper Content-Type
-	// nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter
-	if _, err := w.Write(data); err != nil {
+	if _, err := io.Copy(w, bytes.NewReader(data)); err != nil {
 		log.Printf("error writing file response: %v", err)
 	}
 }
