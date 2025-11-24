@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Realtime CPU Monitor</title>
+    <style>
+        body { font-family: sans-serif; text-align: center; padding: 50px; background-color: #f0f2f5; }
+        #cpu-usage { font-size: 4em; font-weight: bold; color: #333; margin-top: 20px; }
+        .container { background: white; padding: 40px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); display: inline-block; }
+    </style>
+    <script>
+        function updateCpu() {
+            fetch('/api/cpu')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('cpu-usage').innerText = data.cpu + '%';
+                })
+                .catch(err => console.error('Error fetching CPU usage:', err));
+        }
+        setInterval(updateCpu, 1000);
+        window.onload = updateCpu;
+    </script>
+</head>
+<body>
+    <div class="container">
+        <h1>Realtime CPU Usage</h1>
+        <div id="cpu-usage">Loading...</div>
+    </div>
+</body>
+</html>
