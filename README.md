@@ -1,92 +1,89 @@
-# DevSecOps Thesis Prototype: Secure CPU Monitor
+# Automating Software Supply Chain Security: A Framework for Integrating SBOM and SLSA Compliance in CI/CD Pipelines
 
-This repository demonstrates a **SLSA Level 3 compliant DevSecOps pipeline** for a Python Flask application. It integrates automated security scanning, policy enforcement, and secure software supply chain practices.
-
-## 🚀 Application Overview
-
-The application is a lightweight **Realtime CPU Usage Monitor** built with:
-- **Backend**: Python Flask
-- **Server**: Gunicorn (Production-grade WSGI server)
-- **Frontend**: HTML/JS (served via Flask templates)
-- **Container**: Docker (Distroless-style slim image)
-
-## 🛡️ Security Architecture
-
-This project implements a "Shift Left" security approach using the following tools:
-
-| Tool | Purpose | Stage |
-|------|---------|-------|
-| **Syft** | SBOM (Software Bill of Materials) Generation | Build |
-| **Cosign** | Container Signing & Attestation (Keyless) | Build |
-| **Grype** | SCA (Software Composition Analysis) - CVE Scanning | Scan |
-| **Semgrep** | SAST (Static Application Security Testing) | Scan |
-| **TruffleHog** | Secret Scanning (API keys, passwords) | Scan |
-| **OPA** | Policy as Code (Open Policy Agent) | Gate |
-
-## ⛓️ The Pipeline (GitHub Actions)
-
-The pipeline is defined in `.github/workflows/main.yml` and consists of 5 stages:
-
-### 1. Prepare & Verify
-- Checks out code and generates a unique version tag based on the commit SHA and run number.
-- Verifies the source directory structure.
-
-### 2. Build (SLSA Level 3)
-- **Hermetic Build**: Uses Docker Buildx to build the image in an isolated environment.
-- **Signing**: Signs the image using **Sigstore/Cosign** (Keyless mode with OIDC).
-- **SBOM**: Generates a CycloneDX JSON SBOM and attaches it to the image registry as an attestation.
-- **Verification**: Verifies the signature immediately to ensure non-falsifiable provenance.
-
-### 3. Security Scanning
-- **SCA**: Scans the generated SBOM for known CVEs (Common Vulnerabilities and Exposures).
-- **SAST**: Scans the source code (`app/`) for insecure coding patterns (e.g., SQL injection, XSS).
-- **Secrets**: Scans the entire git history for hardcoded secrets.
-
-### 4. Policy Enforcement (The Gatekeeper)
-- Uses **OPA (Open Policy Agent)** to evaluate the results from Stage 3 against `policy/policy.rego`.
-- **Decision Logic**:
-    - **ALLOW** if: No Critical/High CVEs, No Critical/High SAST issues, No Secrets, SLSA L3 requirements met.
-    - **DENY** if: Any blocking condition is met.
-
-### 5. Reporting
-- Generates a detailed markdown summary and uploads artifacts.
+**Author:** Vivekkumar Kasundra  
+**University:** Hochschule Albstadt Sigmaringen
 
 ---
 
-## 📊 Understanding the Pipeline Summary
+## 1. Motivation and Problem
 
-The GitHub Actions summary provides a snapshot of the security posture. Here's what each element means:
+Today, software companies release new code very fast (DevOps). To work efficiently, they utilize a significant amount of open-source code. However, using outside code is a security risk. Famous attacks like **SolarWinds** and **Log4j** showed that bad actors can hide harmful code in these open-source parts.
 
-### 📦 Build Information
-- **Version**: The unique tag assigned to this build (e.g., `v1.0.123-abc1234`).
-- **Image**: The full registry path to the built container.
+To fix this problem, there are new security standards:
+- **Software Bill of Materials (SBOM):** A list of all code parts inside a software.
+- **Supply-chain Levels for Software Artifacts (SLSA):** Rules to make the software building process safer.
 
-### 📋 SBOM Analysis
-- **Components**: The total number of software libraries, packages, and OS dependencies found inside the container. A higher number increases the attack surface.
+The main problem is that using these rules is often a slow, manual process. **The Research Problem:** There is no complete, automatic system that puts SBOM and SLSA security checks directly into the fast CI/CD pipeline. This thesis builds and tests such a system.
 
-### 🔍 Security Scan Results
-This section breaks down vulnerabilities by severity:
-- **CVE Vulnerabilities**: Known flaws in dependencies (e.g., an old version of `flask` or `glibc`).
-    - **Critical/High**: Immediate action required (Blocks deployment).
-    - **Medium/Low**: Warnings (May not block, depending on policy).
-- **Code Security (SAST)**: Flaws in *your* code (e.g., `app.run()` in production, missing input validation).
-- **Secrets**: Hardcoded credentials found in the code.
+## 2. Research Questions
 
-### 🛡️ Policy Enforcement
-- **Status**: `PASSED` or `FAILED`.
-- **Decision**: `APPROVED` (Deployable) or `REJECTED` (Blocked).
-- **Violations**: The number of specific policy rules broken (e.g., "1 High CVE found").
+To solve this problem, this thesis answers three main questions:
 
-### 🏆 SLSA Level 3 Compliance
-- **Provenance**: Verifies that the artifact was built by *this* specific CI/CD workflow (authenticated via OIDC).
-- **Hermetic**: The build process was isolated and reproducible.
-- **Signing**: The artifact is cryptographically signed.
+- **RQ1:** How can we add automatic SBOM creation and security scans into a CI/CD pipeline, without making the process too slow?
+- **RQ2:** What are the most important rules we need to write as code to meet the SLSA security standard?
+- **RQ3:** How can we demonstrate that this new automatic security system is effective? (e.g., reduces risk, easy for developers).
+
+## 3. Research Method: Design Science Research (DSR)
+
+This project uses the DSR method to build a new IT solution for a real-world problem.
+
+1.  **Study and Learn:** Researching DevSecOps, SBOM, SLSA, and tools like Syft, Grype, and Sigstore.
+2.  **Design and Build a Working Model:** Creating a secure CI/CD pipeline (this repository).
+3.  **Test the Model:** Measuring security effectiveness, speed, and ease of use.
+
+---
+
+## 4. The Working Model (Prototype Implementation)
+
+This repository contains the **Working Example** of the thesis: a SLSA Level 3 compliant DevSecOps pipeline for a Python Flask application.
+
+### 🚀 Application Overview
+The application is a lightweight **Realtime CPU Usage Monitor** built with:
+- **Backend**: Python Flask, Gunicorn
+- **Frontend**: HTML/JS
+- **Container**: Docker (Distroless-style slim image)
+
+### 🛡️ Security Architecture (Shift Left)
+
+| Tool | Purpose | Stage |
+|------|---------|-------|
+| **Syft** | SBOM Generation (CycloneDX) | Build |
+| **Cosign** | Container Signing & Attestation (Keyless) | Build |
+| **Grype** | SCA (Vulnerability Scanning) | Scan |
+| **Semgrep** | SAST (Static Code Analysis) | Scan |
+| **TruffleHog** | Secret Scanning | Scan |
+| **OPA** | Policy Enforcement (Gatekeeper) | Gate |
+
+### ⛓️ The Pipeline (GitHub Actions)
+
+The pipeline (`.github/workflows/main.yml`) implements the secure supply chain:
+
+1.  **Prepare & Verify:** Versioning and source verification.
+2.  **Build (SLSA L3):**
+    *   **Hermetic Build:** Isolated Docker Buildx environment.
+    *   **Signing:** Keyless signing with Sigstore/Cosign.
+    *   **Attestation:** SBOM attached to the image registry.
+3.  **Security Scanning:** Automated SCA, SAST, and Secret scans.
+4.  **Policy Enforcement:** **OPA** evaluates results against `policy/policy.rego`.
+    *   **ALLOW** if: No Critical/High Vulnerabilities, No Secrets, SLSA L3 met.
+    *   **DENY** if: Blocking conditions are met.
+5.  **Reporting:** Generates a detailed security summary.
+
+---
+
+## 5. Expected Results
+
+This thesis produces:
+- **A Tested Plan for Security:** A complete guide for building this system.
+- **A Working Example:** This real, deployable pipeline.
+- **Real Data:** Metrics on system speed and effectiveness.
+- **Good Advice:** Tips for companies implementing supply chain security.
 
 ---
 
 ## 💻 Local Development
 
-To run the application locally (requires Docker):
+To run the prototype application locally:
 
 ```bash
 # Build the image
@@ -97,8 +94,3 @@ docker run -p 5000:5000 cpu-monitor
 ```
 
 Access the dashboard at `http://localhost:5000`.
-
-## 🔧 Configuration
-
-- **Policy**: Edit `policy/policy.rego` to change blocking criteria (e.g., allow Medium CVEs).
-- **Pipeline**: Edit `.github/workflows/main.yml` to adjust scan settings or timeouts.
