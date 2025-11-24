@@ -44,5 +44,6 @@ def cpu():
     # psutil.cpu_percent(interval=None) returns 0.0 on first call.
     return jsonify({'cpu': psutil.cpu_percent(interval=1)})
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+# For production, use a WSGI server like Gunicorn
+# if __name__ == '__main__':
+#     app.run(host='0.0.0.0', port=5000)
