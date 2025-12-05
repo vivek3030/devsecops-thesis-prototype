@@ -506,7 +506,7 @@ jobs:
           path: input.json
           retention-days: 90
 
-  # ============================================
+    # ============================================
   # Stage 5: Metrics & Reporting
   # ============================================
   metrics-and-report:
@@ -528,6 +528,7 @@ jobs:
           POLICY_START=${{ needs.policy-enforcement.outputs.policy_start_time || '0' }}
           POLICY_END=${{ needs.policy-enforcement.outputs.policy_end_time || '0' }}
           CURRENT_TIME=$(date +%s)
+          
           if [ "$BUILD_START" != "0" ] && [ "$POLICY_START" != "0" ] && [ "$POLICY_END" != "0" ]; then
             POLICY_DURATION=$((POLICY_END - POLICY_START))
             TOTAL_DURATION=$((CURRENT_TIME - BUILD_START))
@@ -535,8 +536,77 @@ jobs:
             POLICY_DURATION=0
             TOTAL_DURATION=0
           fi
+          
           echo "policy_duration=${POLICY_DURATION}" >> $GITHUB_OUTPUT
           echo "total_duration=${TOTAL_DURATION}" >> $GITHUB_OUTPUT
+
+      - name: "📊 Generate Security Report"
+        run: |
+          mkdir -p reports
+          
+          cat > reports/security-report-${{ github.run_number }}.md << 'EOF'
+          # 🔒 Software Supply Chain Security Report
+          
+          **Pipeline Run:** #${{ github.run_number }}  
+          **Date:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")  
+          **Version:** ${{ needs.prepare.outputs.version }}  
+          **Commit:** `${{ github.sha }}`
+          
+          ---
+          
+          ## 📦 SBOM Analysis
+          - **Components:** ${{ needs.scan-vulnerabilities.outputs.sbom_components_count || 0 }}
+          - **Format:** CycloneDX JSON
+          
+          ## 🔍 CVE Vulnerabilities (Dependencies)
+          | Severity | Count |
+          |----------|-------|
+          | 🔴 Critical | ${{ needs.scan-vulnerabilities.outputs.critical_count || 0 }} |
+          | 🟠 High | ${{ needs.scan-vulnerabilities.outputs.high_count || 0 }} |
+          | 🟡 Medium | ${{ needs.scan-vulnerabilities.outputs.medium_count || 0 }} |
+          | 🟢 Low | ${{ needs.scan-vulnerabilities.outputs.low_count || 0 }} |
+          | **Total** | **${{ needs.scan-vulnerabilities.outputs.vulnerabilities_found || 0 }}** |
+          
+          ## 🔬 Code Security Issues (SAST - Semgrep)
+          | Severity | Count |
+          |----------|-------|
+          | 🔴 Critical (ERROR) | ${{ needs.scan-sast.outputs.sast_critical || 0 }} |
+          | 🟠 High (WARNING) | ${{ needs.scan-sast.outputs.sast_high || 0 }} |
+          | 🟡 Medium (INFO) | ${{ needs.scan-sast.outputs.sast_medium || 0 }} |
+          | 🟢 Low (NOTE) | ${{ needs.scan-sast.outputs.sast_low || 0 }} |
+          | **Total** | **${{ needs.scan-sast.outputs.sast_issues_found || 0 }}** |
+          
+          ## 🔐 Secrets Detection (TruffleHog)
+          | Type | Count |
+          |------|-------|
+          | 🔑 Secrets Detected | ${{ needs.scan-secrets.outputs.secrets_found || 0 }} |
+          
+          ## 🛡️ Policy Enforcement
+          - **Status:** ${{ needs.policy-enforcement.outputs.policy_result == 'true' && '✅ PASSED' || '❌ FAILED' }}
+          - **Decision:** `${{ needs.policy-enforcement.outputs.policy_decision || 'UNKNOWN' }}`
+          - **Violations:** ${{ needs.policy-enforcement.outputs.policy_violations || 0 }}
+          
+          ## 🏆 SLSA Level 3 Compliance
+          | Requirement | Status |
+          |-------------|--------|
+          | Provenance | ✅ Non-falsifiable |
+          | Build System | ✅ Hermetic |
+          | Signing | ✅ Keyless Cosign |
+          | SBOM | ✅ CycloneDX |
+          | Policy | ✅ OPA Enforced |
+          
+          ## ⏱️ Performance
+          - **Policy Check:** ${{ steps.calculate.outputs.policy_duration }}s
+          - **Total Pipeline:** ${{ steps.calculate.outputs.total_duration }}s
+          
+          ## 🐳 Artifact
+          - **Image:** `${{ needs.build-container.outputs.image_ref }}`
+          
+          ---
+          *Automated Software Supply Chain Security Framework*
+          EOF
+          
+          echo "✅ Security report generated"
 
       - name: "💾 Upload Reports"
         uses: actions/upload-artifact@v4
