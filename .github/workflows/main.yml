@@ -584,6 +584,13 @@ jobs:
           echo "policy_duration=${POLICY_DURATION}" >> $GITHUB_OUTPUT
           echo "total_duration=${TOTAL_DURATION}" >> $GITHUB_OUTPUT
 
+      - name: "⏱️ Add Performance to Summary"
+        if: always()
+        run: |
+          echo "## ⏱️ Pipeline Performance" >> $GITHUB_STEP_SUMMARY
+          echo "- **Total Duration:** ${{ steps.calculate.outputs.total_duration }} seconds" >> $GITHUB_STEP_SUMMARY
+          echo "- **Policy Check:** ${{ steps.calculate.outputs.policy_duration }} seconds" >> $GITHUB_STEP_SUMMARY
+
       - name: "📊 Generate Consolidated Security Report"
         run: |
           mkdir -p reports
@@ -804,7 +811,7 @@ jobs:
           ---
           
           *Automated Software Supply Chain Security Framework*  
-          *Generated: $(date -u +"%Y-%m-%d %H:%M:%S UTC")*  
+          *Generated:${TIMESTAMP}*  
           *For questions, contact your security team*
           EOF
           
