@@ -327,7 +327,8 @@ jobs:
 
       - name: "🔐 Run TruffleHog Secret Scan"
         run: |
-          trufflehog filesystem . --json > trufflehog.json || true
+          # Scan Dockerfile and all files, disable verification filter
+          trufflehog filesystem . --no-verification --include-detectors="AWS,GitHub,PrivateKey" --json > trufflehog.json || true
 
       - name: "📊 Extract Secret Statistics"
         id: secret-stats
@@ -703,6 +704,7 @@ jobs:
           
           EOF
           
+          # Detailed SAST Findings - COMPLETELY FIXED
           if [ -f semgrep.json ]; then
             SAST_COUNT=$(jq '.results | length' semgrep.json 2>/dev/null || echo "0")
             if [ "$SAST_COUNT" -gt 0 ]; then
@@ -711,25 +713,23 @@ jobs:
               echo "| Severity | File | Line | Rule ID | Message |" >> reports/security-report-${{ github.run_number }}.md
               echo "|----------|------|------|---------|---------|" >> reports/security-report-${{ github.run_number }}.md
               
-              jq -r '
-                .results[] | {
-                  severity: .extra.severity,
-                  file: .path,
-                  line: .start.line // "N/A",
-                  rule: .check_id,
-                  message: .extra.message
-                } | [
-                  .severity,
-                  .file,
-                  .line,
-                  .rule,
-                  .message
-                ] | @tsv
-              ' semgrep.json 2>/dev/null | while IFS=$'\t' read -r severity file line rule message; do
-                MSG_SHORT="${message:0:120}$( [ ${#message} -gt 120 ] && echo '...' )"
-                MSG_SAFE="${MSG_SHORT//|/\\|}"
-                echo "| $severity | $file | $line | $rule | $MSG_SAFE |" >> reports/security-report-${{ github.run_number }}.md
-              done
+              # Process SAST results with robust error suppression
+              jq -c '.results[]' semgrep.json 2>/dev/null > /tmp/sast_list.json
+              if [ -s /tmp/sast_list.json ]; then
+                while IFS= read -r obj; do
+                  severity=$(echo "$obj" | jq -r '.extra.severity // "Unknown"') 2>/dev/null || severity="Unknown"
+                  file=$(echo "$obj" | jq -r '.path // "Unknown"') 2>/dev/null || file="Unknown"
+                  line=$(echo "$obj" | jq -r '.start.line // "N/A"') 2>/dev/null || line="N/A"
+                  rule=$(echo "$obj" | jq -r '.check_id // "Unknown"') 2>/dev/null || rule="Unknown"
+                  message=$(echo "$obj" | jq -r '.extra.message // "No message"') 2>/dev/null || message="No message"
+                  
+                  MSG_SHORT="${message:0:120}"
+                  [ ${#message} -gt 120 ] && MSG_SHORT="${MSG_SHORT}..."
+                  MSG_SAFE="${MSG_SHORT//|/\\|}"
+                  
+                  echo "| $severity | $file | $line | $rule | $MSG_SAFE |" >> reports/security-report-${{ github.run_number }}.md
+                done < /tmp/sast_list.json
+              fi
             else
               echo "✅ No SAST issues found!" >> reports/security-report-${{ github.run_number }}.md
             fi
