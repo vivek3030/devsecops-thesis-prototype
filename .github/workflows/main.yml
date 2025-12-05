@@ -584,13 +584,7 @@ jobs:
           echo "policy_duration=${POLICY_DURATION}" >> $GITHUB_OUTPUT
           echo "total_duration=${TOTAL_DURATION}" >> $GITHUB_OUTPUT
 
-      - name: "⏱️ Add Performance to Summary"
-        if: always()
-        run: |
-          echo "## ⏱️ Pipeline Performance" >> $GITHUB_STEP_SUMMARY
-          echo "- **Total Duration:** ${{ steps.calculate.outputs.total_duration }} seconds" >> $GITHUB_STEP_SUMMARY
-          echo "- **Policy Check:** ${{ steps.calculate.outputs.policy_duration }} seconds" >> $GITHUB_STEP_SUMMARY
-
+      
       - name: "📊 Generate Consolidated Security Report"
         run: |
           mkdir -p reports
@@ -790,7 +784,7 @@ jobs:
           fi
           
           # Footer
-          cat >> reports/security-report-${{ github.run_number }}.md << 'EOF'
+          cat >> reports/security-report-${{ github.run_number }}.md << EOF
           
           ---
           
@@ -811,12 +805,20 @@ jobs:
           ---
           
           *Automated Software Supply Chain Security Framework*  
-          *Generated:${TIMESTAMP}*  
+          *Generated:$(date -u +"%Y-%m-%d %H:%M:%S UTC")*  
           *For questions, contact your security team*
           EOF
           
           echo "✅ Consolidated security report generated"
           echo "📄 Report size: $(wc -c < reports/security-report-${{ github.run_number }}.md) bytes"
+
+      - name: "⏱️ Add Performance to Summary"
+        if: always()
+        run: |
+          echo "## ⏱️ Pipeline Performance" >> $GITHUB_STEP_SUMMARY
+          echo "- **Total Duration:** ${{ steps.calculate.outputs.total_duration }} seconds" >> $GITHUB_STEP_SUMMARY
+          echo "- **Policy Check:** ${{ steps.calculate.outputs.policy_duration }} seconds" >> $GITHUB_STEP_SUMMARY
+
 
       - name: "💾 Upload Consolidated Report"
         uses: actions/upload-artifact@v4
