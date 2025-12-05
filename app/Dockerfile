@@ -1,10 +1,12 @@
 FROM python:3.11-slim 
 
-# 🔴 Remove security updates
+# 🔴 Remove security updates (vulnerability)
 # RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
 
-# 🔴 Install unnecessary packages (increase attack surface)
-RUN apt-get update && apt-get install -y curl vim netcat && rm -rf /var/lib/apt/lists/*
+# 🔴 Install unnecessary packages (increase attack surface) - FIXED
+RUN apt-get update && \
+    apt-get install -y curl vim && \
+    rm -rf /var/lib/apt/lists/*
 
 # 🔴 SECURITY VULNERABILITY: Secrets in ENV
 ENV DATABASE_PASSWORD="super_secret_password_123"
