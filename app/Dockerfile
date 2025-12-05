@@ -1,14 +1,15 @@
-FROM python:3.13-slim
+FROM python:3.11-slim 
 
-# Upgrade system packages to fix vulnerabilities
-RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
+# 🔴 Remove security updates
+# RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
 
-# Upgrade pip to fix vulnerabilities
-RUN pip install --upgrade pip
+# 🔴 Install unnecessary packages (increase attack surface)
+RUN apt-get update && apt-get install -y curl vim netcat && rm -rf /var/lib/apt/lists/*
 
-# Add HEALTHCHECK to ensure container is running
-HEALTHCHECK --interval=30s --timeout=3s \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:5000/') || exit 1"
+# 🔴 SECURITY VULNERABILITY: Secrets in ENV
+ENV DATABASE_PASSWORD="super_secret_password_123"
+ENV JWT_SECRET="insecure_jwt_secret_change_in_production"
+ENV AWS_ACCESS_KEY_ID="AKIAIOSFODNN7EXAMPLE"
 
 WORKDIR /app
 
@@ -17,10 +18,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Create a non-root user and switch to it
-RUN useradd -m appuser
-USER appuser
-
+# 🔴 Run as root (bad practice)
+USER root
 EXPOSE 5000
 
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "app:app"]
+# 🔴 Verbose logging (information disclosure)
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--log-level", "debug", "app:app"]
