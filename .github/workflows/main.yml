@@ -215,20 +215,21 @@ jobs:
             echo "🔍 Raw severity distribution from Grype:"
             jq '[.matches[]?.vulnerability?.severity // "null"] | group_by(.) | map({severity: .[0], count: length}) | sort_by(.severity)' vulnerabilities.json || echo "  Unable to parse"
             
-            # Count unique CVEs by severity (robust against null/empty)
-            CRITICAL=$(jq '[.matches[] | select(.vulnerability?.severity | test("critical"; "i"))] | unique_by(.vulnerability.id) | length' vulnerabilities.json 2>/dev/null || echo "0")
-            HIGH=$(jq '[.matches[] | select(.vulnerability?.severity | test("high"; "i"))] | unique_by(.vulnerability.id) | length' vulnerabilities.json 2>/dev/null || echo "0")
-            MEDIUM=$(jq '[.matches[] | select(.vulnerability?.severity | test("medium"; "i"))] | unique_by(.vulnerability.id) | length' vulnerabilities.json 2>/dev/null || echo "0")
-            LOW=$(jq '[.matches[] | select(.vulnerability?.severity | test("low|negligible|unknown"; "i"))] | unique_by(.vulnerability.id) | length' vulnerabilities.json 2>/dev/null || echo "0")
+            # Count unique CVEs by severity (robust against null/empty, case-insensitive)
+            CRITICAL=$(jq '[.matches[] | select(.vulnerability.severity | test("critical"; "i"))] | unique_by(.vulnerability.id) | length' vulnerabilities.json 2>/dev/null || echo "0")
+            HIGH=$(jq '[.matches[] | select(.vulnerability.severity | test("high"; "i"))] | unique_by(.vulnerability.id) | length' vulnerabilities.json 2>/dev/null || echo "0")
+            MEDIUM=$(jq '[.matches[] | select(.vulnerability.severity | test("medium"; "i"))] | unique_by(.vulnerability.id) | length' vulnerabilities.json 2>/dev/null || echo "0")
+            # Capture Low, negligible, unknown, and other low-severity values
+            LOW=$(jq '[.matches[] | select(.vulnerability.severity | test("low|negligible|unknown|info"; "i"))] | unique_by(.vulnerability.id) | length' vulnerabilities.json 2>/dev/null || echo "0")
             
-            # Calculate total as sum (more reliable)
+            # Calculate total as sum (more reliable than separate query)
             TOTAL=$((CRITICAL + HIGH + MEDIUM + LOW))
             
             # Debug: Show if there are unmatched severities
-            UNMATCHED=$(jq '[.matches[] | select(.vulnerability?.severity | test("critical|high|medium|low|negligible|unknown"; "i") | not)] | length' vulnerabilities.json 2>/dev/null || echo "0")
+            UNMATCHED=$(jq '[.matches[] | select(.vulnerability.severity | test("critical|high|medium|low|negligible|unknown|info"; "i") | not)] | length' vulnerabilities.json 2>/dev/null || echo "0")
             if [ "$UNMATCHED" -gt 0 ]; then
               echo "⚠️  Found $UNMATCHED matches with non-standard severities:"
-              jq '[.matches[] | select(.vulnerability?.severity | test("critical|high|medium|low|negligible|unknown"; "i") | not) | .vulnerability.severity] | unique' vulnerabilities.json 2>/dev/null || echo "  Unable to list"
+              jq '[.matches[] | select(.vulnerability.severity | test("critical|high|medium|low|negligible|unknown|info"; "i") | not) | .vulnerability.severity] | unique' vulnerabilities.json 2>/dev/null || echo "  Unable to list"
             fi
           else
             echo "⚠️  vulnerabilities.json not found, setting all counts to 0"
@@ -242,7 +243,7 @@ jobs:
           echo "low=${LOW}" >> $GITHUB_OUTPUT
           
           echo "🔍 Final Counts - CVE Vulnerabilities: ${TOTAL} (C:${CRITICAL} H:${HIGH} M:${MEDIUM} L:${LOW})"
-
+          
       - name: "💾 Upload Vulnerability Results"
         uses: actions/upload-artifact@v4
         with:
@@ -365,6 +366,7 @@ jobs:
       policy_end_time: ${{ steps.policy-end.outputs.time }}
       policy_result: ${{ steps.opa_eval.outputs.passed }}
       policy_violations: ${{ steps.opa_eval.outputs.violations }}
+      policy_warnings: ${{ steps.opa_eval.outputs.warnings }}
       policy_decision: ${{ steps.opa_eval.outputs.decision }}
 
     steps:
@@ -585,16 +587,19 @@ jobs:
         run: |
           mkdir -p reports
           
-          # Start with header
-          cat > reports/security-report-${{ github.run_number }}.md << 'EOF'
+          # Generate timestamp
+          TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          
+          # Start header
+          cat > reports/security-report-${{ github.run_number }}.md << EOF
           # 🔒 Software Supply Chain Security Report
           
           **Pipeline Run:** #${{ github.run_number }}  
-          **Date:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")  
+          **Date:** ${TIMESTAMP}  
           **Version:** ${{ needs.prepare.outputs.version }}  
-          **Commit:** `${{ github.sha }}`
+          **Commit:** \`${{ github.sha }}\`
           
-          **Image:** `${{ needs.build-container.outputs.image_ref }}`
+          **Image:** \`${{ needs.build-container.outputs.image_ref }}\`
           
           ---
           
@@ -612,7 +617,7 @@ jobs:
           EOF
           
           # CVE Vulnerabilities Section
-          cat >> reports/security-report-${{ github.run_number }}.md << 'EOF'
+          cat >> reports/security-report-${{ github.run_number }}.md << EOF
           
           ## 🔍 CVE Vulnerabilities (Dependencies)
           
@@ -626,31 +631,62 @@ jobs:
           
           EOF
           
-          # Detailed CVE list
+          # Detailed CVE List - COMPLETELY FIXED
           if [ -f vulnerabilities.json ]; then
+            echo "🔍 Processing vulnerabilities.json..."
             VULN_COUNT=$(jq '[.matches[]?.vulnerability?.id] | unique | length' vulnerabilities.json 2>/dev/null || echo "0")
+            
             if [ "$VULN_COUNT" -gt 0 ]; then
               echo "### Detailed CVE List" >> reports/security-report-${{ github.run_number }}.md
               echo "" >> reports/security-report-${{ github.run_number }}.md
               echo "| CVE ID | Severity | Package | Version | Fix Available | Description |" >> reports/security-report-${{ github.run_number }}.md
               echo "|--------|----------|---------|---------|---------------|-------------|" >> reports/security-report-${{ github.run_number }}.md
               
+              # Debug: Print first few entries
+              echo "📊 Sample of first 3 CVEs:"
               jq -r '
-                [.matches[] | {
-                  id: .vulnerability.id,
-                  severity: .vulnerability.severity // "Unknown",
-                  package: .artifact.name,
-                  version: .artifact.version,
-                  fix: .vulnerability.fix?.state // "unknown",
-                  description: .vulnerability.description // "No description"
-                }] | unique_by(.id) | sort_by(.severity) | reverse[] | 
-                @tsv
-              ' vulnerabilities.json 2>/dev/null | while IFS=$'\t' read -r id severity package version fix description; do
-                # Truncate long descriptions and escape pipes
-                DESC_SHORT="${description:0:150}$( [ ${#description} -gt 150 ] && echo '...' )"
-                DESC_SAFE="${DESC_SHORT//|/\\|}"
-                echo "| $id | $severity | $package | $version | $fix | $DESC_SAFE |" >> reports/security-report-${{ github.run_number }}.md
-              done
+                [.matches[] | select(.vulnerability?.id != null)] | 
+                unique_by(.vulnerability.id) | 
+                limit(3; .[]) | 
+                "\(.vulnerability.id) | \(.vulnerability.severity) | \(.artifact.name)"
+              ' vulnerabilities.json 2>/dev/null || echo "Cannot parse sample"
+              
+              # Use a more robust approach - process line by line with explicit checks
+              jq -c '
+                [.matches[] | select(.vulnerability?.id != null)] | 
+                unique_by(.vulnerability.id) | 
+                sort_by(.vulnerability.severity) | reverse[]
+              ' vulnerabilities.json > /tmp/cve_list.json 2>/dev/null
+              
+              if [ -s /tmp/cve_list.json ]; then
+                echo "✅ Found $(wc -l < /tmp/cve_list.json) CVEs to process"
+                
+                while IFS= read -r obj; do
+                  id=$(echo "$obj" | jq -r '.vulnerability.id // "Unknown"')
+                  severity=$(echo "$obj" | jq -r '.vulnerability.severity // "Unknown"')
+                  package=$(echo "$obj" | jq -r '.artifact.name // "Unknown"')
+                  version=$(echo "$obj" | jq -r '.artifact.version // "Unknown"')
+                  fix=$(echo "$obj" | jq -r '.vulnerability.fix.state // "unknown"')
+                  description=$(echo "$obj" | jq -r '.vulnerability.description // "No description available"')
+                  
+                  # Clean up any remaining null values
+                  severity="${severity//null/Unknown}"
+                  package="${package//null/Unknown}"
+                  version="${version//null/Unknown}"
+                  fix="${fix//null/unknown}"
+                  description="${description//null/No description}"
+                  
+                  # Truncate and escape for markdown
+                  DESC_SHORT="${description:0:150}$( [ ${#description} -gt 150 ] && echo '...' )"
+                  DESC_SAFE="${DESC_SHORT//|/\\|}"
+                  
+                  echo "| $id | $severity | $package | $version | $fix | $DESC_SAFE |" >> reports/security-report-${{ github.run_number }}.md
+                done < /tmp/cve_list.json
+                
+                echo "✅ Processed all CVEs"
+              else
+                echo "⚠️ No CVE data could be extracted" >> reports/security-report-${{ github.run_number }}.md
+              fi
             else
               echo "✅ No CVE vulnerabilities found!" >> reports/security-report-${{ github.run_number }}.md
             fi
