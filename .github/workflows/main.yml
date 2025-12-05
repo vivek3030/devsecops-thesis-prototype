@@ -243,7 +243,7 @@ jobs:
           echo "low=${LOW}" >> $GITHUB_OUTPUT
           
           echo "🔍 Final Counts - CVE Vulnerabilities: ${TOTAL} (C:${CRITICAL} H:${HIGH} M:${MEDIUM} L:${LOW})"
-          
+
       - name: "💾 Upload Vulnerability Results"
         uses: actions/upload-artifact@v4
         with:
@@ -631,7 +631,7 @@ jobs:
           
           EOF
           
-          # Detailed CVE List - COMPLETELY FIXED
+          # Detailed CVE List - FAIL-SAFE VERSION
           if [ -f vulnerabilities.json ]; then
             echo "🔍 Processing vulnerabilities.json..."
             VULN_COUNT=$(jq '[.matches[]?.vulnerability?.id] | unique | length' vulnerabilities.json 2>/dev/null || echo "0")
@@ -642,50 +642,42 @@ jobs:
               echo "| CVE ID | Severity | Package | Version | Fix Available | Description |" >> reports/security-report-${{ github.run_number }}.md
               echo "|--------|----------|---------|---------|---------------|-------------|" >> reports/security-report-${{ github.run_number }}.md
               
-              # Debug: Print first few entries
-              echo "📊 Sample of first 3 CVEs:"
-              jq -r '
-                [.matches[] | select(.vulnerability?.id != null)] | 
-                unique_by(.vulnerability.id) | 
-                limit(3; .[]) | 
-                "\(.vulnerability.id) | \(.vulnerability.severity) | \(.artifact.name)"
-              ' vulnerabilities.json 2>/dev/null || echo "Cannot parse sample"
-              
-              # Use a more robust approach - process line by line with explicit checks
+              # Process CVEs with robust error suppression
               jq -c '
                 [.matches[] | select(.vulnerability?.id != null)] | 
                 unique_by(.vulnerability.id) | 
                 sort_by(.vulnerability.severity) | reverse[]
-              ' vulnerabilities.json > /tmp/cve_list.json 2>/dev/null
+              ' vulnerabilities.json 2>/dev/null > /tmp/cve_list.json
               
               if [ -s /tmp/cve_list.json ]; then
                 echo "✅ Found $(wc -l < /tmp/cve_list.json) CVEs to process"
                 
+                # Process each CVE - NEVER let a command fail
                 while IFS= read -r obj; do
-                  id=$(echo "$obj" | jq -r '.vulnerability.id // "Unknown"')
-                  severity=$(echo "$obj" | jq -r '.vulnerability.severity // "Unknown"')
-                  package=$(echo "$obj" | jq -r '.artifact.name // "Unknown"')
-                  version=$(echo "$obj" | jq -r '.artifact.version // "Unknown"')
-                  fix=$(echo "$obj" | jq -r '.vulnerability.fix.state // "unknown"')
-                  description=$(echo "$obj" | jq -r '.vulnerability.description // "No description available"')
+                  # Initialize defaults and suppress all jq errors
+                  id=$(echo "$obj" | jq -r '.vulnerability.id // "Unknown"') 2>/dev/null || id="Unknown"
+                  severity=$(echo "$obj" | jq -r '.vulnerability.severity // "Unknown"') 2>/dev/null || severity="Unknown"
+                  package=$(echo "$obj" | jq -r '.artifact.name // "Unknown"') 2>/dev/null || package="Unknown"
+                  version=$(echo "$obj" | jq -r '.artifact.version // "Unknown"') 2>/dev/null || version="Unknown"
+                  fix=$(echo "$obj" | jq -r '.vulnerability.fix.state // "unknown"') 2>/dev/null || fix="unknown"
+                  description=$(echo "$obj" | jq -r '.vulnerability.description // "No description"') 2>/dev/null || description="No description"
                   
-                  # Clean up any remaining null values
-                  severity="${severity//null/Unknown}"
+                  # Additional null string cleanup
+                  severity="${severity//null/unknown}"
                   package="${package//null/Unknown}"
                   version="${version//null/Unknown}"
                   fix="${fix//null/unknown}"
                   description="${description//null/No description}"
                   
-                  # Truncate and escape for markdown
-                  DESC_SHORT="${description:0:150}$( [ ${#description} -gt 150 ] && echo '...' )"
+                  # Truncate and escape
+                  DESC_SHORT="${description:0:150}"
+                  [ ${#description} -gt 150 ] && DESC_SHORT="${DESC_SHORT}..."
                   DESC_SAFE="${DESC_SHORT//|/\\|}"
                   
                   echo "| $id | $severity | $package | $version | $fix | $DESC_SAFE |" >> reports/security-report-${{ github.run_number }}.md
                 done < /tmp/cve_list.json
-                
-                echo "✅ Processed all CVEs"
               else
-                echo "⚠️ No CVE data could be extracted" >> reports/security-report-${{ github.run_number }}.md
+                echo "⚠️ No CVE data extracted" >> reports/security-report-${{ github.run_number }}.md
               fi
             else
               echo "✅ No CVE vulnerabilities found!" >> reports/security-report-${{ github.run_number }}.md
