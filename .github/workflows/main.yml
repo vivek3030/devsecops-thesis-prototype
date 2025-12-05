@@ -461,10 +461,11 @@ jobs:
           echo "passed=${PASSED}" >> $GITHUB_OUTPUT
           VIOLATIONS_RESULT=$(opa eval -i input.json -d ./policy 'data.main.deny' --format=json 2>/dev/null || echo '{"result":[{"expressions":[{"value":[]}]}]}')
           VIOLATION_COUNT=$(echo "$VIOLATIONS_RESULT" | jq -r '.result[0].expressions[0].value | length' | tr -d '[:space:]')
-          if ! [[ "$VIOLATION_COUNT" =~ ^[0-9]+$ ]]; then VIOLATION_COUNT=0; fi
           echo "violations=${VIOLATION_COUNT}" >> $GITHUB_OUTPUT
           WARNINGS_RESULT=$(opa eval -i input.json -d ./policy 'data.main.warnings' --format=json 2>/dev/null || echo '{"result":[{"expressions":[{"value":[]}]}]}')
           WARNING_COUNT=$(echo "$WARNINGS_RESULT" | jq -r '.result[0].expressions[0].value | length' | tr -d '[:space:]')
+          if ! [[ "$WARNING_COUNT" =~ ^[0-9]+$ ]]; then WARNING_COUNT=0; fi
+          echo "warnings=${WARNING_COUNT}" >> $GITHUB_OUTPUT
           if ! [[ "$WARNING_COUNT" =~ ^[0-9]+$ ]]; then WARNING_COUNT=0; fi
           COMPLIANCE=$(opa eval -i input.json -d ./policy 'data.main.compliance_report' --format=json 2>/dev/null || echo '{"result":[{"expressions":[{"value":{}}]}]}')
           COMPLIANCE_DATA=$(echo "$COMPLIANCE" | jq -r '.result[0].expressions[0].value // {}')
@@ -525,7 +526,7 @@ jobs:
           path: input.json
           retention-days: 90
 
-    # ============================================
+  # ============================================
   # Stage 5: Metrics & Reporting
   # ============================================
   metrics-and-report:
@@ -539,6 +540,27 @@ jobs:
     steps:
       - name: "📋 Checkout Repository"
         uses: actions/checkout@v4
+
+      # Download all scan results first
+      - name: "⬇️ Download SBOM Artifact"
+        uses: actions/download-artifact@v4
+        with:
+          name: sbom
+
+      - name: "⬇️ Download Vulnerability Results"
+        uses: actions/download-artifact@v4
+        with:
+          name: vulnerability-results
+
+      - name: "⬇️ Download SAST Results"
+        uses: actions/download-artifact@v4
+        with:
+          name: sast-results
+
+      - name: "⬇️ Download Secret Scan Results"
+        uses: actions/download-artifact@v4
+        with:
+          name: secret-scan-results
 
       - name: "📊 Calculate Pipeline Metrics"
         id: calculate
@@ -559,10 +581,11 @@ jobs:
           echo "policy_duration=${POLICY_DURATION}" >> $GITHUB_OUTPUT
           echo "total_duration=${TOTAL_DURATION}" >> $GITHUB_OUTPUT
 
-      - name: "📊 Generate Security Report"
+      - name: "📊 Generate Consolidated Security Report"
         run: |
           mkdir -p reports
           
+          # Start with header
           cat > reports/security-report-${{ github.run_number }}.md << 'EOF'
           # 🔒 Software Supply Chain Security Report
           
@@ -571,13 +594,28 @@ jobs:
           **Version:** ${{ needs.prepare.outputs.version }}  
           **Commit:** `${{ github.sha }}`
           
+          **Image:** `${{ needs.build-container.outputs.image_ref }}`
+          
           ---
           
-          ## 📦 SBOM Analysis
-          - **Components:** ${{ needs.scan-vulnerabilities.outputs.sbom_components_count || 0 }}
-          - **Format:** CycloneDX JSON
+          ## 📊 Executive Summary
+          
+          | Scan Type | Issues Found | Status |
+          |-----------|--------------|--------|
+          | 🔍 CVE Vulnerabilities | ${{ needs.scan-vulnerabilities.outputs.vulnerabilities_found || 0 }} | ${{ needs.scan-vulnerabilities.outputs.vulnerabilities_found != '0' && '⚠️ Action Required' || '✅ Clean' }} |
+          | 🔬 Code Security (SAST) | ${{ needs.scan-sast.outputs.sast_issues_found || 0 }} | ${{ needs.scan-sast.outputs.sast_issues_found != '0' && '⚠️ Review Needed' || '✅ Clean' }} |
+          | 🔐 Secrets Detected | ${{ needs.scan-secrets.outputs.secrets_found || 0 }} | ${{ needs.scan-secrets.outputs.secrets_found != '0' && '🚨 Immediate Action' || '✅ Clean' }} |
+          | 🛡️ Policy Compliance | ${{ needs.policy-enforcement.outputs.policy_violations || 0 }} violations | ${{ needs.policy-enforcement.outputs.policy_result == 'true' && '✅ PASSED' || '❌ FAILED' }} |
+          
+          ---
+          
+          EOF
+          
+          # CVE Vulnerabilities Section
+          cat >> reports/security-report-${{ github.run_number }}.md << 'EOF'
           
           ## 🔍 CVE Vulnerabilities (Dependencies)
+          
           | Severity | Count |
           |----------|-------|
           | 🔴 Critical | ${{ needs.scan-vulnerabilities.outputs.critical_count || 0 }} |
@@ -586,7 +624,47 @@ jobs:
           | 🟢 Low | ${{ needs.scan-vulnerabilities.outputs.low_count || 0 }} |
           | **Total** | **${{ needs.scan-vulnerabilities.outputs.vulnerabilities_found || 0 }}** |
           
+          EOF
+          
+          # Detailed CVE list
+          if [ -f vulnerabilities.json ]; then
+            VULN_COUNT=$(jq '[.matches[]?.vulnerability?.id] | unique | length' vulnerabilities.json 2>/dev/null || echo "0")
+            if [ "$VULN_COUNT" -gt 0 ]; then
+              echo "### Detailed CVE List" >> reports/security-report-${{ github.run_number }}.md
+              echo "" >> reports/security-report-${{ github.run_number }}.md
+              echo "| CVE ID | Severity | Package | Version | Fix Available | Description |" >> reports/security-report-${{ github.run_number }}.md
+              echo "|--------|----------|---------|---------|---------------|-------------|" >> reports/security-report-${{ github.run_number }}.md
+              
+              jq -r '
+                [.matches[] | {
+                  id: .vulnerability.id,
+                  severity: .vulnerability.severity // "Unknown",
+                  package: .artifact.name,
+                  version: .artifact.version,
+                  fix: .vulnerability.fix?.state // "unknown",
+                  description: .vulnerability.description // "No description"
+                }] | unique_by(.id) | sort_by(.severity) | reverse[] | 
+                @tsv
+              ' vulnerabilities.json 2>/dev/null | while IFS=$'\t' read -r id severity package version fix description; do
+                # Truncate long descriptions and escape pipes
+                DESC_SHORT="${description:0:150}$( [ ${#description} -gt 150 ] && echo '...' )"
+                DESC_SAFE="${DESC_SHORT//|/\\|}"
+                echo "| $id | $severity | $package | $version | $fix | $DESC_SAFE |" >> reports/security-report-${{ github.run_number }}.md
+              done
+            else
+              echo "✅ No CVE vulnerabilities found!" >> reports/security-report-${{ github.run_number }}.md
+            fi
+          else
+            echo "⚠️ CVE scan results not available" >> reports/security-report-${{ github.run_number }}.md
+          fi
+          
+          echo "" >> reports/security-report-${{ github.run_number }}.md
+          
+          # SAST Issues Section
+          cat >> reports/security-report-${{ github.run_number }}.md << 'EOF'
+          
           ## 🔬 Code Security Issues (SAST - Semgrep)
+          
           | Severity | Count |
           |----------|-------|
           | 🔴 Critical (ERROR) | ${{ needs.scan-sast.outputs.sast_critical || 0 }} |
@@ -595,101 +673,125 @@ jobs:
           | 🟢 Low (NOTE) | ${{ needs.scan-sast.outputs.sast_low || 0 }} |
           | **Total** | **${{ needs.scan-sast.outputs.sast_issues_found || 0 }}** |
           
+          EOF
+          
+          if [ -f semgrep.json ]; then
+            SAST_COUNT=$(jq '.results | length' semgrep.json 2>/dev/null || echo "0")
+            if [ "$SAST_COUNT" -gt 0 ]; then
+              echo "### Detailed SAST Findings" >> reports/security-report-${{ github.run_number }}.md
+              echo "" >> reports/security-report-${{ github.run_number }}.md
+              echo "| Severity | File | Line | Rule ID | Message |" >> reports/security-report-${{ github.run_number }}.md
+              echo "|----------|------|------|---------|---------|" >> reports/security-report-${{ github.run_number }}.md
+              
+              jq -r '
+                .results[] | {
+                  severity: .extra.severity,
+                  file: .path,
+                  line: .start.line // "N/A",
+                  rule: .check_id,
+                  message: .extra.message
+                } | [
+                  .severity,
+                  .file,
+                  .line,
+                  .rule,
+                  .message
+                ] | @tsv
+              ' semgrep.json 2>/dev/null | while IFS=$'\t' read -r severity file line rule message; do
+                MSG_SHORT="${message:0:120}$( [ ${#message} -gt 120 ] && echo '...' )"
+                MSG_SAFE="${MSG_SHORT//|/\\|}"
+                echo "| $severity | $file | $line | $rule | $MSG_SAFE |" >> reports/security-report-${{ github.run_number }}.md
+              done
+            else
+              echo "✅ No SAST issues found!" >> reports/security-report-${{ github.run_number }}.md
+            fi
+          else
+            echo "⚠️ SAST scan results not available" >> reports/security-report-${{ github.run_number }}.md
+          fi
+          
+          echo "" >> reports/security-report-${{ github.run_number }}.md
+          
+          # Secrets Section
+          cat >> reports/security-report-${{ github.run_number }}.md << 'EOF'
+          
           ## 🔐 Secrets Detection (TruffleHog)
+          
           | Type | Count |
           |------|-------|
-          | 🔑 Secrets Detected | ${{ needs.scan-secrets.outputs.secrets_found || 0 }} |
+          | 🔑 Verified Secrets | ${{ needs.scan-secrets.outputs.secrets_found || 0 }} |
           
-          ## 🛡️ Policy Enforcement
+          EOF
+          
+          if [ -f trufflehog.json ]; then
+            SECRET_COUNT=$(jq '[.[]? | select(.Verified == true)] | length' trufflehog.json 2>/dev/null || echo "0")
+            if [ "$SECRET_COUNT" -gt 0 ]; then
+              echo "### Detailed Secret Findings (Verified Only)" >> reports/security-report-${{ github.run_number }}.md
+              echo "" >> reports/security-report-${{ github.run_number }}.md
+              echo "| File | Line | Detector Type | Secret Preview |" >> reports/security-report-${{ github.run_number }}.md
+              echo "|------|------|---------------|----------------|" >> reports/security-report-${{ github.run_number }}.md
+              
+              jq -r '
+                [.[]? | select(.Verified == true)] | .[] | {
+                  file: .SourceMetadata?.Data?.Filesystem?.file // "Unknown",
+                  line: .SourceMetadata?.Data?.Filesystem?.line // "N/A",
+                  type: .DetectorName // "Unknown",
+                  secret: .Redacted // .Raw // "Hidden"
+                } | [
+                  .file,
+                  .line,
+                  .type,
+                  .secret
+                ] | @tsv
+              ' trufflehog.json 2>/dev/null | while IFS=$'\t' read -r file line type secret; do
+                SECRET_SHORT="${secret:0:50}$( [ ${#secret} -gt 50 ] && echo '...' )"
+                SECRET_SAFE="${SECRET_SHORT//|/\\|}"
+                echo "| $file | $line | $type | $SECRET_SAFE |" >> reports/security-report-${{ github.run_number }}.md
+              done
+            else
+              echo "✅ No verified secrets found!" >> reports/security-report-${{ github.run_number }}.md
+            fi
+          else
+            echo "⚠️ Secret scan results not available" >> reports/security-report-${{ github.run_number }}.md
+          fi
+          
+          # Footer
+          cat >> reports/security-report-${{ github.run_number }}.md << 'EOF'
+          
+          ---
+          
+          ## 🛡️ Policy Enforcement Details
+          
           - **Status:** ${{ needs.policy-enforcement.outputs.policy_result == 'true' && '✅ PASSED' || '❌ FAILED' }}
           - **Decision:** `${{ needs.policy-enforcement.outputs.policy_decision || 'UNKNOWN' }}`
           - **Violations:** ${{ needs.policy-enforcement.outputs.policy_violations || 0 }}
+          - **Warnings:** ${{ needs.policy-enforcement.outputs.policy_warnings || 0 }}
           
-          ## 🏆 SLSA Level 3 Compliance
-          | Requirement | Status |
-          |-------------|--------|
-          | Provenance | ✅ Non-falsifiable |
-          | Build System | ✅ Hermetic |
-          | Signing | ✅ Keyless Cosign |
-          | SBOM | ✅ CycloneDX |
-          | Policy | ✅ OPA Enforced |
-          
-          ## ⏱️ Performance
-          - **Policy Check:** ${{ steps.calculate.outputs.policy_duration }}s
-          - **Total Pipeline:** ${{ steps.calculate.outputs.total_duration }}s
-          
-          ## 🐳 Artifact
-          - **Image:** `${{ needs.build-container.outputs.image_ref }}`
+          **Next Steps for Developers:**
+          1. **Review** all identified issues above
+          2. **Prioritize** Critical/High severity findings first
+          3. **Fix** vulnerabilities and rescan
+          4. **Address** policy violations before deployment
+          5. **Rerun** pipeline after fixes are applied
           
           ---
-          *Automated Software Supply Chain Security Framework*
+          
+          *Automated Software Supply Chain Security Framework*  
+          *Generated: $(date -u +"%Y-%m-%d %H:%M:%S UTC")*  
+          *For questions, contact your security team*
           EOF
           
-          echo "✅ Security report generated"
+          echo "✅ Consolidated security report generated"
+          echo "📄 Report size: $(wc -c < reports/security-report-${{ github.run_number }}.md) bytes"
 
-      - name: "💾 Upload Reports"
+      - name: "💾 Upload Consolidated Report"
         uses: actions/upload-artifact@v4
         with:
           name: security-report
           path: reports/
           retention-days: 90
 
-      - name: "📊 Pipeline Summary"
+      - name: "📊 Generate GitHub Step Summary"
         if: always()
         run: |
-          echo "# 🏆 SLSA Level 3 Supply Chain Security Pipeline" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Mission:** Automating Software Supply Chain Security with SBOM and SLSA Compliance" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## 📦 Build Information" >> $GITHUB_STEP_SUMMARY
-          echo "- **Version:** \`${{ needs.prepare.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Image:** \`${{ needs.build-container.outputs.image_ref }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## 📋 SBOM Analysis" >> $GITHUB_STEP_SUMMARY
-          echo "- **Components:** ${{ needs.scan-vulnerabilities.outputs.sbom_components_count || 0 }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Format:** CycloneDX JSON" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## 🔍 Security Scan Results" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### CVE Vulnerabilities (Dependencies)" >> $GITHUB_STEP_SUMMARY
-          echo "| Severity | Count |" >> $GITHUB_STEP_SUMMARY
-          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| 🔴 Critical | ${{ needs.scan-vulnerabilities.outputs.critical_count || 0 }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🟠 High | ${{ needs.scan-vulnerabilities.outputs.high_count || 0 }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🟡 Medium | ${{ needs.scan-vulnerabilities.outputs.medium_count || 0 }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🟢 Low | ${{ needs.scan-vulnerabilities.outputs.low_count || 0 }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Total** | **${{ needs.scan-vulnerabilities.outputs.vulnerabilities_found || 0 }}** |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Code Security Issues (SAST - Semgrep)" >> $GITHUB_STEP_SUMMARY
-          echo "| Severity | Count |" >> $GITHUB_STEP_SUMMARY
-          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| 🔴 Critical (ERROR) | ${{ needs.scan-sast.outputs.sast_critical || 0 }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🟠 High (WARNING) | ${{ needs.scan-sast.outputs.sast_high || 0 }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🟡 Medium (INFO) | ${{ needs.scan-sast.outputs.sast_medium || 0 }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🟢 Low (NOTE) | ${{ needs.scan-sast.outputs.sast_low || 0 }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Total** | **${{ needs.scan-sast.outputs.sast_issues_found || 0 }}** |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Secrets Detection (TruffleHog)" >> $GITHUB_STEP_SUMMARY
-          echo "| Type | Count |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| 🔐 Secrets Detected | ${{ needs.scan-secrets.outputs.secrets_found || 0 }} |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## 🛡️ Policy Enforcement" >> $GITHUB_STEP_SUMMARY
-          echo "- **Status:** ${{ needs.policy-enforcement.outputs.policy_result == 'true' && '✅ PASSED' || '❌ FAILED' }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Decision:** \`${{ needs.policy-enforcement.outputs.policy_decision || 'UNKNOWN' }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Violations:** ${{ needs.policy-enforcement.outputs.policy_violations || 0 }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## 🏆 SLSA Level 3 Compliance" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ **Provenance:** Non-falsifiable (Sigstore)" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ **Build System:** Hermetic (Docker Buildx)" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ **Signing:** Keyless with Cosign" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ **SBOM:** CycloneDX attached" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ **Policy:** OPA enforcement" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## ⏱️ Performance" >> $GITHUB_STEP_SUMMARY
-          echo "- **Total Duration:** ${{ steps.calculate.outputs.total_duration }}s" >> $GITHUB_STEP_SUMMARY
-          echo "- **Policy Check:** ${{ steps.calculate.outputs.policy_duration }}s" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "---" >> $GITHUB_STEP_SUMMARY
-          echo "*Automated Software Supply Chain Security Framework*" >> $GITHUB_STEP_SUMMARY
+          # Use the report content for step summary (truncated version)
+          cat reports/security-report-${{ github.run_number }}.md >> $GITHUB_STEP_SUMMARY
