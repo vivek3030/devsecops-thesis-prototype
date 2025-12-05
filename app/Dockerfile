@@ -1,13 +1,10 @@
-FROM python:3.11-slim 
+FROM python:3.9-slim
 
-# 🔴 Remove security updates (vulnerability)
-# RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
-
-# 🔴 Install unnecessary packages (increase attack surface) - FIXED
+# 🔴 Install build tools + vulnerable packages (more CVEs!)
 RUN apt-get update && \
-    apt-get install -y curl vim && \
+    apt-get install -y gcc python3-dev curl vim && \
     rm -rf /var/lib/apt/lists/*
-
+    
 # 🔴 SECURITY VULNERABILITY: Secrets in ENV
 ENV DATABASE_PASSWORD="super_secret_password_123"
 ENV JWT_SECRET="insecure_jwt_secret_change_in_production"
