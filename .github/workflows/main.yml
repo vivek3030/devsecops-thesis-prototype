@@ -208,21 +208,40 @@ jobs:
       - name: "📉 Extract CVE Vulnerability Statistics"
         id: vuln-stats
         run: |
+          echo "📊 Analyzing CVE vulnerability scan results..."
+          
           if [ -f vulnerabilities.json ]; then
-            TOTAL=$(jq '[.matches[] | select(.vulnerability.id != null and .vulnerability.id != "")] | unique_by(.vulnerability.id) | length' vulnerabilities.json 2>/dev/null || echo "0")
-            CRITICAL=$(jq '[.matches[] | select(.vulnerability.severity == "Critical" and .vulnerability.id != null)] | unique_by(.vulnerability.id) | length' vulnerabilities.json 2>/dev/null || echo "0")
-            HIGH=$(jq '[.matches[] | select(.vulnerability.severity == "High" and .vulnerability.id != null)] | unique_by(.vulnerability.id) | length' vulnerabilities.json 2>/dev/null || echo "0")
-            MEDIUM=$(jq '[.matches[] | select(.vulnerability.severity == "Medium" and .vulnerability.id != null)] | unique_by(.vulnerability.id) | length' vulnerabilities.json 2>/dev/null || echo "0")
-            LOW=$(jq '[.matches[] | select(.vulnerability.severity == "Low" and .vulnerability.id != null)] | unique_by(.vulnerability.id) | length' vulnerabilities.json 2>/dev/null || echo "0")
+            # Get ALL severities present in the data for debugging
+            echo "🔍 Raw severity distribution from Grype:"
+            jq '[.matches[]?.vulnerability?.severity // "null"] | group_by(.) | map({severity: .[0], count: length}) | sort_by(.severity)' vulnerabilities.json || echo "  Unable to parse"
+            
+            # Count unique CVEs by severity (robust against null/empty)
+            CRITICAL=$(jq '[.matches[] | select(.vulnerability?.severity | test("critical"; "i"))] | unique_by(.vulnerability.id) | length' vulnerabilities.json 2>/dev/null || echo "0")
+            HIGH=$(jq '[.matches[] | select(.vulnerability?.severity | test("high"; "i"))] | unique_by(.vulnerability.id) | length' vulnerabilities.json 2>/dev/null || echo "0")
+            MEDIUM=$(jq '[.matches[] | select(.vulnerability?.severity | test("medium"; "i"))] | unique_by(.vulnerability.id) | length' vulnerabilities.json 2>/dev/null || echo "0")
+            LOW=$(jq '[.matches[] | select(.vulnerability?.severity | test("low|negligible|unknown"; "i"))] | unique_by(.vulnerability.id) | length' vulnerabilities.json 2>/dev/null || echo "0")
+            
+            # Calculate total as sum (more reliable)
+            TOTAL=$((CRITICAL + HIGH + MEDIUM + LOW))
+            
+            # Debug: Show if there are unmatched severities
+            UNMATCHED=$(jq '[.matches[] | select(.vulnerability?.severity | test("critical|high|medium|low|negligible|unknown"; "i") | not)] | length' vulnerabilities.json 2>/dev/null || echo "0")
+            if [ "$UNMATCHED" -gt 0 ]; then
+              echo "⚠️  Found $UNMATCHED matches with non-standard severities:"
+              jq '[.matches[] | select(.vulnerability?.severity | test("critical|high|medium|low|negligible|unknown"; "i") | not) | .vulnerability.severity] | unique' vulnerabilities.json 2>/dev/null || echo "  Unable to list"
+            fi
           else
+            echo "⚠️  vulnerabilities.json not found, setting all counts to 0"
             TOTAL=0; CRITICAL=0; HIGH=0; MEDIUM=0; LOW=0
           fi
+          
           echo "total=${TOTAL}" >> $GITHUB_OUTPUT
           echo "critical=${CRITICAL}" >> $GITHUB_OUTPUT
           echo "high=${HIGH}" >> $GITHUB_OUTPUT
           echo "medium=${MEDIUM}" >> $GITHUB_OUTPUT
           echo "low=${LOW}" >> $GITHUB_OUTPUT
-          echo "🔍 Vulnerabilities: ${TOTAL} (C:${CRITICAL} H:${HIGH} M:${MEDIUM} L:${LOW})"
+          
+          echo "🔍 Final Counts - CVE Vulnerabilities: ${TOTAL} (C:${CRITICAL} H:${HIGH} M:${MEDIUM} L:${LOW})"
 
       - name: "💾 Upload Vulnerability Results"
         uses: actions/upload-artifact@v4
