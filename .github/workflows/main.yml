@@ -450,18 +450,15 @@ jobs:
 
       - name: "🔒 Evaluate Security Policy"
         id: opa_eval
+        continue-on-error: true
         run: |
-          # [OPA evaluation logic remains identical to original]
-          # Copy the entire OPA evaluation block from your original
-          # policy-enforcement job here
-          set -e
           echo ""
           echo "🛡️ ===== SECURITY POLICY EVALUATION ====="
           echo ""
-          opa eval -i input.json -d ./policy 'data.main' --format=pretty 2>&1 || { echo "❌ OPA evaluation failed!"; exit 1; }
+          opa eval -i input.json -d ./policy 'data.main' --format=pretty 2>&1 || { echo "❌ OPA evaluation failed!"; echo "decision=ERROR" >> $GITHUB_OUTPUT; exit 1; }
           ALLOW_RESULT=$(opa eval -i input.json -d ./policy 'data.main.allow' --format=json 2>&1)
           PASSED=$(echo "$ALLOW_RESULT" | jq -r '.result[0].expressions[0].value // false' | tr -d '[:space:]')
-          if [ -z "$PASSED" ] || [ "$PASSED" = "null" ]; then echo "❌ ERROR: Could not evaluate allow rule!"; exit 1; fi
+          if [ -z "$PASSED" ] || [ "$PASSED" = "null" ]; then echo "❌ ERROR: Could not evaluate allow rule!"; echo "decision=ERROR" >> $GITHUB_OUTPUT; exit 1; fi
           echo "passed=${PASSED}" >> $GITHUB_OUTPUT
           VIOLATIONS_RESULT=$(opa eval -i input.json -d ./policy 'data.main.deny' --format=json 2>/dev/null || echo '{"result":[{"expressions":[{"value":[]}]}]}')
           VIOLATION_COUNT=$(echo "$VIOLATIONS_RESULT" | jq -r '.result[0].expressions[0].value | length' | tr -d '[:space:]')
@@ -499,7 +496,6 @@ jobs:
             echo "   The image meets all security requirements"
             echo "   and can proceed to deployment."
             echo "===================================="
-            exit 0
           else
             echo "decision=REJECTED" >> $GITHUB_OUTPUT
             echo "❌ ===== POLICY CHECK FAILED ====="
@@ -514,8 +510,8 @@ jobs:
             echo ""
             echo "   Review Stage 3 logs for detailed security findings."
             echo "===================================="
-            exit 1
           fi
+          [ "$PASSED" = "true" ] && exit 0 || exit 1
 
       - name: "⏱️ Record Policy Check End"
         id: policy-end
