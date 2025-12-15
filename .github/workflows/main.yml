@@ -359,6 +359,7 @@ jobs:
     name: "4️⃣ Security Policy Enforcement (OPA)"
     runs-on: ubuntu-latest
     needs: [prepare, build-container, scan-vulnerabilities, scan-sast, scan-secrets]
+    if: always()
     permissions:
       contents: read
 
