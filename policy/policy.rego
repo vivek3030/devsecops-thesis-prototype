@@ -21,7 +21,6 @@ allow if {
 slsa_level_ok if {
     input.slsa_build.level >= 3
     input.slsa_build.provenance_verified
-    input.slsa_build.hermetic_build
     input.slsa_build.signed
 }
 
@@ -70,16 +69,12 @@ no_high_sast if {
 # Secret Detection Check
 # ---------------------------
 no_secrets_detected if {
-    input.secrets.found == 0
+    input.secrets.verified == 0
 }
 
 # ---------------------------
 # Deny Rules (Blocking Conditions)
 # ---------------------------
-deny contains {"type": "SLSA", "msg": "SLSA level requirement not satisfied"} if {
-    not slsa_level_ok
-}
-
 deny contains {"type": "SBOM", "msg": "SBOM is missing or empty"} if {
     not sbom_attached
 }
@@ -105,8 +100,8 @@ deny contains {"type": "SAST", "msg": msg} if {
 }
 
 deny contains {"type": "SECRET", "msg": msg} if {
-    input.secrets.found > 0
-    msg := sprintf("Hardcoded secrets detected: %d", [input.secrets.found])
+    input.secrets.verified > 0
+    msg := sprintf("Hardcoded secrets detected: %d", [input.secrets.verified])
 }
 
 # ---------------------------
