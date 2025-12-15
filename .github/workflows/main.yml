@@ -103,8 +103,8 @@ jobs:
           push: true
           tags: ${{ needs.prepare.outputs.image_name }}:${{ needs.prepare.outputs.image_tag }}
           platforms: linux/amd64
-          provenance: false
-          sbom: false
+          provenance: true
+          sbom: true
           build-args: |
             VERSION=${{ needs.prepare.outputs.version }}
             BUILD_DATE=${{ needs.prepare.outputs.build_start_time }}
@@ -124,8 +124,6 @@ jobs:
         uses: sigstore/cosign-installer@v3
 
       - name: "✏️ Sign Container Image (SLSA Requirement)"
-        env:
-          COSIGN_EXPERIMENTAL: 1
         run: |
           cosign sign --yes "${{ steps.image-ref.outputs.ref }}"
 
@@ -135,8 +133,6 @@ jobs:
           syft "${{ steps.image-ref.outputs.ref }}" -o cyclonedx-json > bom.json
 
       - name: "🔎 Attach SBOM Attestation (SLSA Requirement)"
-        env:
-          COSIGN_EXPERIMENTAL: 1
         run: |
           cosign attest --yes --type cyclonedx --predicate bom.json "${{ steps.image-ref.outputs.ref }}"
 
@@ -148,8 +144,6 @@ jobs:
           retention-days: 90
 
       - name: "🔐 Verify Signature (SLSA L3 Verification)"
-        env:
-          COSIGN_EXPERIMENTAL: 1
         run: |
           cosign verify \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
@@ -328,7 +322,7 @@ jobs:
       - name: "🔐 Run TruffleHog Secret Scan"
         run: |
           # Scan Dockerfile and all files, disable verification filter
-          trufflehog filesystem . --no-verification --include-detectors="AWS,GitHub,PrivateKey" --json > trufflehog.json || true
+          trufflehog filesystem . --include-detectors="AWS,GitHub,PrivateKey" --json > trufflehog.json || true
 
       - name: "📊 Extract Secret Statistics"
         id: secret-stats
@@ -359,6 +353,7 @@ jobs:
     name: "4️⃣ Security Policy Enforcement (OPA)"
     runs-on: ubuntu-latest
     needs: [prepare, build-container, scan-vulnerabilities, scan-sast, scan-secrets]
+    if: always()
     permissions:
       contents: read
 
@@ -451,7 +446,9 @@ jobs:
         id: opa_eval
         run: |
           # [OPA evaluation logic remains identical to original]
-          # Copy the entire OPA evaluation block from your original
+          opa eval -i input.json -d ./policy 'data.main' --format=json > policy-result.json
+          PASSED=$(jq -r '.result[0].expressions[0].value.passed' policy-result.json)
+          
           # policy-enforcement job here
           set -e
           echo ""
