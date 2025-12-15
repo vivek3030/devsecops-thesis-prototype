@@ -21,6 +21,7 @@ jobs:
   prepare:
     name: "1️⃣ Prepare & Verify Source"
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
 
@@ -33,7 +34,7 @@ jobs:
     steps:
       - name: "⏱️ Record Start Time"
         id: start-time
-        run: echo "time=$(date +%s)" >> $GITHUB_OUTPUT
+        run: echo "time=$(date +%s)" >> "$GITHUB_OUTPUT"
 
       - name: "📋 Checkout Repository"
         uses: actions/checkout@v4
@@ -42,7 +43,7 @@ jobs:
         id: version
         run: |
           VERSION="v1.0.${{ github.run_number }}-${GITHUB_SHA::8}"
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "🏷️ Version: ${VERSION}"
 
       - name: "🏷️ Set Image Information"
@@ -50,8 +51,8 @@ jobs:
         run: |
           IMAGE_NAME="${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPO }}"
           IMAGE_TAG="${{ steps.version.outputs.version }}"
-          echo "image_name=${IMAGE_NAME}" >> $GITHUB_OUTPUT
-          echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+          echo "image_name=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
           echo "🏷️ Image Name: ${IMAGE_NAME}"
           echo "🏷️ Image Tag: ${IMAGE_TAG}"
 
@@ -67,9 +68,10 @@ jobs:
   # Stage 2: Build Container Image (SLSA L3)
   # ============================================
   build-container:
-    name: "2️⃣ Build Container Image (SLSA L3)"
+    name: "2️⃣ Build & Sign Container Image"
     needs: [prepare]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
@@ -103,8 +105,10 @@ jobs:
           push: true
           tags: ${{ needs.prepare.outputs.image_name }}:${{ needs.prepare.outputs.image_tag }}
           platforms: linux/amd64
+          sbom: false  # Disable built-in SBOM, we'll generate with Syft for consistency
           provenance: true
-          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           build-args: |
             VERSION=${{ needs.prepare.outputs.version }}
             BUILD_DATE=${{ needs.prepare.outputs.build_start_time }}
@@ -115,15 +119,15 @@ jobs:
         run: |
           DIGEST="${{ steps.build.outputs.digest }}"
           IMAGE_REF="${{ needs.prepare.outputs.image_name }}@${DIGEST}"
-          echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
-          echo "ref=${IMAGE_REF}" >> $GITHUB_OUTPUT
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "ref=${IMAGE_REF}" >> "$GITHUB_OUTPUT"
           echo "🔍 Image Digest: ${DIGEST}"
           echo "🔍 Image Ref: ${IMAGE_REF}"
 
       - name: "🔐 Install Cosign"
         uses: sigstore/cosign-installer@v3
 
-      - name: "✏️ Sign Container Image (SLSA Requirement)"
+      - name: "✏️ Sign Container Image"
         run: |
           cosign sign --yes "${{ steps.image-ref.outputs.ref }}"
 
@@ -132,7 +136,7 @@ jobs:
           curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
           syft "${{ steps.image-ref.outputs.ref }}" -o cyclonedx-json > bom.json
 
-      - name: "🔎 Attach SBOM Attestation (SLSA Requirement)"
+      - name: "🔎 Attach SBOM Attestation"
         run: |
           cosign attest --yes --type cyclonedx --predicate bom.json "${{ steps.image-ref.outputs.ref }}"
 
@@ -143,7 +147,7 @@ jobs:
           path: bom.json
           retention-days: 90
 
-      - name: "🔐 Verify Signature (SLSA L3 Verification)"
+      - name: "🔐 Verify Signature"
         run: |
           cosign verify \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
@@ -156,6 +160,7 @@ jobs:
   scan-vulnerabilities:
     name: "3️⃣a SBOM & Vulnerability Scan"
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: [build-container]
     permissions:
       contents: read
@@ -192,51 +197,32 @@ jobs:
         id: sbom-stats
         run: |
           COMPONENT_COUNT=$(jq '.components | length' bom.json 2>/dev/null || echo "0")
-          echo "count=${COMPONENT_COUNT}" >> $GITHUB_OUTPUT
+          echo "count=${COMPONENT_COUNT}" >> "$GITHUB_OUTPUT"
           echo "📦 SBOM Components: ${COMPONENT_COUNT}"
 
-      - name: "🔍 Scan for CVE Vulnerabilities (Grype)"
+      - name: "🔍 Scan for CVE Vulnerabilities"
         run: |
           grype sbom:bom.json -o json > vulnerabilities.json || echo '{"matches": []}' > vulnerabilities.json
 
-      - name: "📉 Extract CVE Vulnerability Statistics"
+      - name: "📉 Extract CVE Statistics"
         id: vuln-stats
         run: |
-          echo "📊 Analyzing CVE vulnerability scan results..."
-          
           if [ -f vulnerabilities.json ]; then
-            # Get ALL severities present in the data for debugging
-            echo "🔍 Raw severity distribution from Grype:"
-            jq '[.matches[]?.vulnerability?.severity // "null"] | group_by(.) | map({severity: .[0], count: length}) | sort_by(.severity)' vulnerabilities.json || echo "  Unable to parse"
-            
-            # Count unique CVEs by severity (robust against null/empty, case-insensitive)
-            CRITICAL=$(jq '[.matches[] | select(.vulnerability.severity | test("critical"; "i"))] | unique_by(.vulnerability.id) | length' vulnerabilities.json 2>/dev/null || echo "0")
-            HIGH=$(jq '[.matches[] | select(.vulnerability.severity | test("high"; "i"))] | unique_by(.vulnerability.id) | length' vulnerabilities.json 2>/dev/null || echo "0")
-            MEDIUM=$(jq '[.matches[] | select(.vulnerability.severity | test("medium"; "i"))] | unique_by(.vulnerability.id) | length' vulnerabilities.json 2>/dev/null || echo "0")
-            # Capture Low, negligible, unknown, and other low-severity values
-            LOW=$(jq '[.matches[] | select(.vulnerability.severity | test("low|negligible|unknown|info"; "i"))] | unique_by(.vulnerability.id) | length' vulnerabilities.json 2>/dev/null || echo "0")
-            
-            # Calculate total as sum (more reliable than separate query)
+            # Count each vulnerability instance (not unique) for accuracy
+            CRITICAL=$(jq '[.matches[] | select(.vulnerability.severity | test("critical"; "i"))] | length' vulnerabilities.json 2>/dev/null || echo "0")
+            HIGH=$(jq '[.matches[] | select(.vulnerability.severity | test("high"; "i"))] | length' vulnerabilities.json 2>/dev/null || echo "0")
+            MEDIUM=$(jq '[.matches[] | select(.vulnerability.severity | test("medium"; "i"))] | length' vulnerabilities.json 2>/dev/null || echo "0")
+            LOW=$(jq '[.matches[] | select(.vulnerability.severity | test("low|negligible|unknown|info"; "i"))] | length' vulnerabilities.json 2>/dev/null || echo "0")
             TOTAL=$((CRITICAL + HIGH + MEDIUM + LOW))
-            
-            # Debug: Show if there are unmatched severities
-            UNMATCHED=$(jq '[.matches[] | select(.vulnerability.severity | test("critical|high|medium|low|negligible|unknown|info"; "i") | not)] | length' vulnerabilities.json 2>/dev/null || echo "0")
-            if [ "$UNMATCHED" -gt 0 ]; then
-              echo "⚠️  Found $UNMATCHED matches with non-standard severities:"
-              jq '[.matches[] | select(.vulnerability.severity | test("critical|high|medium|low|negligible|unknown|info"; "i") | not) | .vulnerability.severity] | unique' vulnerabilities.json 2>/dev/null || echo "  Unable to list"
-            fi
           else
-            echo "⚠️  vulnerabilities.json not found, setting all counts to 0"
             TOTAL=0; CRITICAL=0; HIGH=0; MEDIUM=0; LOW=0
           fi
-          
-          echo "total=${TOTAL}" >> $GITHUB_OUTPUT
-          echo "critical=${CRITICAL}" >> $GITHUB_OUTPUT
-          echo "high=${HIGH}" >> $GITHUB_OUTPUT
-          echo "medium=${MEDIUM}" >> $GITHUB_OUTPUT
-          echo "low=${LOW}" >> $GITHUB_OUTPUT
-          
-          echo "🔍 Final Counts - CVE Vulnerabilities: ${TOTAL} (C:${CRITICAL} H:${HIGH} M:${MEDIUM} L:${LOW})"
+          echo "total=${TOTAL}" >> "$GITHUB_OUTPUT"
+          echo "critical=${CRITICAL}" >> "$GITHUB_OUTPUT"
+          echo "high=${HIGH}" >> "$GITHUB_OUTPUT"
+          echo "medium=${MEDIUM}" >> "$GITHUB_OUTPUT"
+          echo "low=${LOW}" >> "$GITHUB_OUTPUT"
+          echo "🔍 CVE Count: ${TOTAL} (C:${CRITICAL} H:${HIGH} M:${MEDIUM} L:${LOW})"
 
       - name: "💾 Upload Vulnerability Results"
         uses: actions/upload-artifact@v4
@@ -251,6 +237,7 @@ jobs:
   scan-sast:
     name: "3️⃣b SAST Code Scan"
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: [prepare]
     permissions:
       contents: read
@@ -271,7 +258,8 @@ jobs:
 
       - name: "🔬 Run Semgrep SAST Scan"
         run: |
-          semgrep scan --config=auto --exclude=".github/workflows/*.yml" --json --output=semgrep.json || true
+          # Use curated security rules only, avoid noisy experimental rules
+          semgrep scan --config=p/security-audit --config=p/secrets --json --output=semgrep.json || true
 
       - name: "📊 Extract SAST Statistics"
         id: sast-stats
@@ -285,11 +273,11 @@ jobs:
           else
             TOTAL=0; CRITICAL=0; HIGH=0; MEDIUM=0; LOW=0
           fi
-          echo "total=${TOTAL}" >> $GITHUB_OUTPUT
-          echo "critical=${CRITICAL}" >> $GITHUB_OUTPUT
-          echo "high=${HIGH}" >> $GITHUB_OUTPUT
-          echo "medium=${MEDIUM}" >> $GITHUB_OUTPUT
-          echo "low=${LOW}" >> $GITHUB_OUTPUT
+          echo "total=${TOTAL}" >> "$GITHUB_OUTPUT"
+          echo "critical=${CRITICAL}" >> "$GITHUB_OUTPUT"
+          echo "high=${HIGH}" >> "$GITHUB_OUTPUT"
+          echo "medium=${MEDIUM}" >> "$GITHUB_OUTPUT"
+          echo "low=${LOW}" >> "$GITHUB_OUTPUT"
           echo "🔬 SAST Issues: ${TOTAL} (C:${CRITICAL} H:${HIGH} M:${MEDIUM} L:${LOW})"
 
       - name: "💾 Upload SAST Results"
@@ -305,11 +293,13 @@ jobs:
   scan-secrets:
     name: "3️⃣c Secret Detection"
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     needs: [prepare]
     permissions:
       contents: read
     outputs:
-      secrets_found: ${{ steps.secret-stats.outputs.secrets }}
+      secrets_found: ${{ steps.secret-stats.outputs.total }}
+      secrets_verified: ${{ steps.secret-stats.outputs.verified }}
 
     steps:
       - name: "📋 Checkout Repository"
@@ -321,23 +311,21 @@ jobs:
 
       - name: "🔐 Run TruffleHog Secret Scan"
         run: |
-          # Scan Dockerfile and all files, disable verification filter
           trufflehog filesystem . --include-detectors="AWS,GitHub,PrivateKey" --json > trufflehog.json || true
 
       - name: "📊 Extract Secret Statistics"
         id: secret-stats
         run: |
           if [ -f trufflehog.json ]; then
-            SECRETS=$(jq '[.[] | select(.Verified == true)] | length' trufflehog.json 2>/dev/null || echo "0")
-            if [ "$SECRETS" -eq 0 ]; then
-              TOTAL_FINDINGS=$(wc -l < trufflehog.json || echo "0")
-              echo "⚠️ Unverified secrets: $TOTAL_FINDINGS (reporting 0)"
-            fi
+            # Count ALL secrets to avoid false negatives, not just verified ones
+            TOTAL=$(jq 'length' trufflehog.json 2>/dev/null || echo "0")
+            VERIFIED=$(jq '[.[] | select(.Verified == true)] | length' trufflehog.json 2>/dev/null || echo "0")
           else
-            SECRETS=0
+            TOTAL=0; VERIFIED=0
           fi
-          echo "secrets=${SECRETS}" >> $GITHUB_OUTPUT
-          echo "🔐 Verified Secrets: ${SECRETS}"
+          echo "total=${TOTAL}" >> "$GITHUB_OUTPUT"
+          echo "verified=${VERIFIED}" >> "$GITHUB_OUTPUT"
+          echo "🔐 Secrets: ${TOTAL} total, ${verified} verified"
 
       - name: "💾 Upload Secret Scan Results"
         uses: actions/upload-artifact@v4
@@ -352,6 +340,7 @@ jobs:
   policy-enforcement:
     name: "4️⃣ Security Policy Enforcement (OPA)"
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     needs: [prepare, build-container, scan-vulnerabilities, scan-sast, scan-secrets]
     if: always()
     permissions:
@@ -368,7 +357,7 @@ jobs:
     steps:
       - name: "⏱️ Record Policy Check Start"
         id: policy-start
-        run: echo "time=$(date +%s)" >> $GITHUB_OUTPUT
+        run: echo "time=$(date +%s)" >> "$GITHUB_OUTPUT"
 
       - name: "📋 Checkout Repository (for policy files)"
         uses: actions/checkout@v4
@@ -393,7 +382,7 @@ jobs:
         with:
           name: secret-scan-results
 
-      - name: "🛡️ Install OPA (Open Policy Agent)"
+      - name: "🛡️ Install OPA"
         run: |
           curl -L -o opa https://github.com/open-policy-agent/opa/releases/latest/download/opa_linux_amd64
           chmod +x opa
@@ -402,6 +391,7 @@ jobs:
 
       - name: "📋 Create OPA Input File"
         run: |
+          # Use actual job results instead of hardcoded compliance data
           cat > input.json << EOF
           {
             "image": {
@@ -410,8 +400,8 @@ jobs:
             },
             "slsa_build": {
               "level": 3,
-              "provenance_verified": true,
-              "hermetic_build": true,
+              "provenance_verified": ${{ needs.build-container.result == 'success' }},
+              "hermetic_build": false,
               "signed": true
             },
             "sbom": {
@@ -432,7 +422,8 @@ jobs:
               "low": ${{ needs.scan-sast.outputs.sast_low }}
             },
             "secrets": {
-              "found": ${{ needs.scan-secrets.outputs.secrets_found }}
+              "found": ${{ needs.scan-secrets.outputs.secrets_found }},
+              "verified": ${{ needs.scan-secrets.outputs.secrets_verified }}
             },
             "metadata": {
               "version": "${{ needs.prepare.outputs.version }}",
@@ -442,96 +433,90 @@ jobs:
           }
           EOF
 
-      - name: "🔒 Evaluate Security Policy"
+      - name: "🔒 Evaluate Security Policy (Single Pass)"
         id: opa_eval
         run: |
-          # [OPA evaluation logic remains identical to original]
-          opa eval -i input.json -d ./policy 'data.main' --format=json > policy-result.json
-          PASSED=$(jq -r '.result[0].expressions[0].value.passed' policy-result.json)
-          
-          # policy-enforcement job here
           set -e
           echo ""
           echo "🛡️ ===== SECURITY POLICY EVALUATION ====="
-          echo ""
-          opa eval -i input.json -d ./policy 'data.main' --format=pretty 2>&1 || { echo "❌ OPA evaluation failed!"; exit 1; }
-          ALLOW_RESULT=$(opa eval -i input.json -d ./policy 'data.main.allow' --format=json 2>&1)
-          PASSED=$(echo "$ALLOW_RESULT" | jq -r '.result[0].expressions[0].value // false' | tr -d '[:space:]')
-          if [ -z "$PASSED" ] || [ "$PASSED" = "null" ]; then echo "❌ ERROR: Could not evaluate allow rule!"; exit 1; fi
-          echo "passed=${PASSED}" >> $GITHUB_OUTPUT
-          VIOLATIONS_RESULT=$(opa eval -i input.json -d ./policy 'data.main.deny' --format=json 2>/dev/null || echo '{"result":[{"expressions":[{"value":[]}]}]}')
-          VIOLATION_COUNT=$(echo "$VIOLATIONS_RESULT" | jq -r '.result[0].expressions[0].value | length' | tr -d '[:space:]')
-          echo "violations=${VIOLATION_COUNT}" >> $GITHUB_OUTPUT
-          WARNINGS_RESULT=$(opa eval -i input.json -d ./policy 'data.main.warnings' --format=json 2>/dev/null || echo '{"result":[{"expressions":[{"value":[]}]}]}')
-          WARNING_COUNT=$(echo "$WARNINGS_RESULT" | jq -r '.result[0].expressions[0].value | length' | tr -d '[:space:]')
-          if ! [[ "$WARNING_COUNT" =~ ^[0-9]+$ ]]; then WARNING_COUNT=0; fi
-          echo "warnings=${WARNING_COUNT}" >> $GITHUB_OUTPUT
-          if ! [[ "$WARNING_COUNT" =~ ^[0-9]+$ ]]; then WARNING_COUNT=0; fi
-          COMPLIANCE=$(opa eval -i input.json -d ./policy 'data.main.compliance_report' --format=json 2>/dev/null || echo '{"result":[{"expressions":[{"value":{}}]}]}')
-          COMPLIANCE_DATA=$(echo "$COMPLIANCE" | jq -r '.result[0].expressions[0].value // {}')
+          
+          # Single OPA evaluation for all data
+          opa eval -i input.json -d ./policy 'data.main' --format=json > policy-result.json
+          
+          PASSED=$(jq -r '.result[0].expressions[0].value.allow' policy-result.json)
+          VIOLATIONS=$(jq -r '.result[0].expressions[0].value.deny | length' policy-result.json)
+          WARNINGS=$(jq -r '.result[0].expressions[0].value.warnings | length' policy-result.json)
+          COMPLIANCE=$(jq -r '.result[0].expressions[0].value.compliance_report' policy-result.json)
+          
+          echo "passed=${PASSED}" >> "$GITHUB_OUTPUT"
+          echo "violations=${VIOLATIONS}" >> "$GITHUB_OUTPUT"
+          echo "warnings=${WARNINGS}" >> "$GITHUB_OUTPUT"
+          
           echo ""
           echo "📊 ===== POLICY EVALUATION RESULTS ====="
           echo "   Compliance Status: ${PASSED}"
-          echo "   Violations: ${VIOLATION_COUNT}"
-          echo "   Warnings: ${WARNING_COUNT}"
+          echo "   Violations: ${VIOLATIONS}"
+          echo "   Warnings: ${WARNINGS}"
           echo "========================================="
-          echo ""
-          if [ "$VIOLATION_COUNT" -gt 0 ]; then
+          
+          if [ "$VIOLATIONS" -gt 0 ]; then
+            echo ""
             echo "❌ POLICY VIOLATIONS DETECTED:"
-            echo "$VIOLATIONS_RESULT" | jq -r '.result[0].expressions[0].value[] | "   ❌ [\(.type)] \(.msg)"' 2>/dev/null || echo "   (Unable to parse violation details)"
-            echo ""
+            jq -r '.result[0].expressions[0].value.deny[] | "   ❌ [\(.type)] \(.msg)"' policy-result.json
           fi
-          if [ "$WARNING_COUNT" -gt 0 ]; then
+          
+          if [ "$WARNINGS" -gt 0 ]; then
+            echo ""
             echo "⚠️  POLICY WARNINGS:"
-            echo "$WARNINGS_RESULT" | jq -r '.result[0].expressions[0].value[] | "   ⚠️  [\(.type)] \(.msg)"' 2>/dev/null || echo "   (Unable to parse warning details)"
-            echo ""
+            jq -r '.result[0].expressions[0].value.warnings[] | "   ⚠️  [\(.type)] \(.msg)"' policy-result.json
           fi
-          echo "📋 DETAILED COMPLIANCE REPORT:"
-          echo "$COMPLIANCE_DATA" | jq '.' 2>/dev/null || echo "{}"
+          
           echo ""
+          echo "📋 DETAILED COMPLIANCE REPORT:"
+          echo "$COMPLIANCE" | jq '.'
+          
           if [ "$PASSED" = "true" ]; then
-            echo "decision=APPROVED" >> $GITHUB_OUTPUT
+            echo "decision=APPROVED" >> "$GITHUB_OUTPUT"
+            echo ""
             echo "✅ ===== POLICY CHECK PASSED ====="
-            echo "   The image meets all security requirements"
-            echo "   and can proceed to deployment."
-            echo "===================================="
+            echo "   Image meets security requirements"
             exit 0
           else
-            echo "decision=REJECTED" >> $GITHUB_OUTPUT
+            echo "decision=REJECTED" >> "$GITHUB_OUTPUT"
+            echo ""
             echo "❌ ===== POLICY CHECK FAILED ====="
-            echo "   The image does NOT meet security requirements."
             echo "   Deployment is BLOCKED."
             echo ""
             echo "   📊 Summary:"
-            echo "   - CVE Critical: $(echo "$COMPLIANCE_DATA" | jq -r '.cve.critical // 0')"
-            echo "   - CVE High: $(echo "$COMPLIANCE_DATA" | jq -r '.cve.high // 0')"
-            echo "   - SAST Critical: $(echo "$COMPLIANCE_DATA" | jq -r '.sast.critical // 0')"
-            echo "   - SAST High: $(echo "$COMPLIANCE_DATA" | jq -r '.sast.high // 0')"
-            echo ""
-            echo "   Review Stage 3 logs for detailed security findings."
-            echo "===================================="
+            echo "   - CVE Critical: $(echo "$COMPLIANCE" | jq -r '.cve.critical // 0')"
+            echo "   - CVE High: $(echo "$COMPLIANCE" | jq -r '.cve.high // 0')"
+            echo "   - SAST Critical: $(echo "$COMPLIANCE" | jq -r '.sast.critical // 0')"
+            echo "   - SAST High: $(echo "$COMPLIANCE" | jq -r '.sast.high // 0')"
             exit 1
           fi
 
       - name: "⏱️ Record Policy Check End"
         id: policy-end
         if: always()
-        run: echo "time=$(date +%s)" >> $GITHUB_OUTPUT
+        run: echo "time=$(date +%s)" >> "$GITHUB_OUTPUT"
 
-      - name: "💾 Upload Policy Evaluation Results"
+      - name: "💾 Upload Policy Results"
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: policy-evaluation
-          path: input.json
+          path: |
+            input.json
+            policy-result.json
           retention-days: 90
 
   # ============================================
   # Stage 5: Metrics & Reporting
   # ============================================
   metrics-and-report:
-    name: "5️⃣ Generate Metrics & Security Report"
+    name: "5️⃣ Generate Security Report"
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: [prepare, build-container, scan-vulnerabilities, scan-sast, scan-secrets, policy-enforcement]
     if: always()
     permissions:
@@ -541,26 +526,8 @@ jobs:
       - name: "📋 Checkout Repository"
         uses: actions/checkout@v4
 
-      # Download all scan results first
-      - name: "⬇️ Download SBOM Artifact"
+      - name: "⬇️ Download All Results"
         uses: actions/download-artifact@v4
-        with:
-          name: sbom
-
-      - name: "⬇️ Download Vulnerability Results"
-        uses: actions/download-artifact@v4
-        with:
-          name: vulnerability-results
-
-      - name: "⬇️ Download SAST Results"
-        uses: actions/download-artifact@v4
-        with:
-          name: sast-results
-
-      - name: "⬇️ Download Secret Scan Results"
-        uses: actions/download-artifact@v4
-        with:
-          name: secret-scan-results
 
       - name: "📊 Calculate Pipeline Metrics"
         id: calculate
@@ -578,19 +545,15 @@ jobs:
             TOTAL_DURATION=0
           fi
           
-          echo "policy_duration=${POLICY_DURATION}" >> $GITHUB_OUTPUT
-          echo "total_duration=${TOTAL_DURATION}" >> $GITHUB_OUTPUT
+          echo "policy_duration=${POLICY_DURATION}" >> "$GITHUB_OUTPUT"
+          echo "total_duration=${TOTAL_DURATION}" >> "$GITHUB_OUTPUT"
 
-      
       - name: "📊 Generate Consolidated Security Report"
         run: |
           mkdir -p reports
-          
-          # Generate timestamp
           TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
           
-          # Start header
-          cat > reports/security-report-${{ github.run_number }}.md << EOF
+          cat > "reports/security-report-${{ github.run_number }}.md" << EOF
           # 🔒 Software Supply Chain Security Report
           
           **Pipeline Run:** #${{ github.run_number }}  
@@ -608,15 +571,10 @@ jobs:
           |-----------|--------------|--------|
           | 🔍 CVE Vulnerabilities | ${{ needs.scan-vulnerabilities.outputs.vulnerabilities_found || 0 }} | ${{ needs.scan-vulnerabilities.outputs.vulnerabilities_found != '0' && '⚠️ Action Required' || '✅ Clean' }} |
           | 🔬 Code Security (SAST) | ${{ needs.scan-sast.outputs.sast_issues_found || 0 }} | ${{ needs.scan-sast.outputs.sast_issues_found != '0' && '⚠️ Review Needed' || '✅ Clean' }} |
-          | 🔐 Secrets Detected | ${{ needs.scan-secrets.outputs.secrets_found || 0 }} | ${{ needs.scan-secrets.outputs.secrets_found != '0' && '🚨 Immediate Action' || '✅ Clean' }} |
+          | 🔐 Secrets Detected | ${{ needs.scan-secrets.outputs.secrets_found || 0 }} (${{ needs.scan-secrets.outputs.secrets_verified || 0 }} verified) | ${{ needs.scan-secrets.outputs.secrets_found != '0' && '🚨 Immediate Action' || '✅ Clean' }} |
           | 🛡️ Policy Compliance | ${{ needs.policy-enforcement.outputs.policy_violations || 0 }} violations | ${{ needs.policy-enforcement.outputs.policy_result == 'true' && '✅ PASSED' || '❌ FAILED' }} |
           
           ---
-          
-          EOF
-          
-          # CVE Vulnerabilities Section
-          cat >> reports/security-report-${{ github.run_number }}.md << EOF
           
           ## 🔍 CVE Vulnerabilities (Dependencies)
           
@@ -628,67 +586,32 @@ jobs:
           | 🟢 Low | ${{ needs.scan-vulnerabilities.outputs.low_count || 0 }} |
           | **Total** | **${{ needs.scan-vulnerabilities.outputs.vulnerabilities_found || 0 }}** |
           
-          EOF
-          
-          # Detailed CVE List - FAIL-SAFE VERSION
-          if [ -f vulnerabilities.json ]; then
-            echo "🔍 Processing vulnerabilities.json..."
-            VULN_COUNT=$(jq '[.matches[]?.vulnerability?.id] | unique | length' vulnerabilities.json 2>/dev/null || echo "0")
-            
+          $(if [ -f vulnerability-results/vulnerabilities.json ]; then
+            VULN_COUNT=$(jq '[.matches[]?.vulnerability?.id] | unique | length' vulnerability-results/vulnerabilities.json 2>/dev/null || echo "0")
             if [ "$VULN_COUNT" -gt 0 ]; then
-              echo "### Detailed CVE List" >> reports/security-report-${{ github.run_number }}.md
-              echo "" >> reports/security-report-${{ github.run_number }}.md
-              echo "| CVE ID | Severity | Package | Version | Fix Available | Description |" >> reports/security-report-${{ github.run_number }}.md
-              echo "|--------|----------|---------|---------|---------------|-------------|" >> reports/security-report-${{ github.run_number }}.md
-              
-              # Process CVEs with robust error suppression
-              jq -c '
-                [.matches[] | select(.vulnerability?.id != null)] | 
-                unique_by(.vulnerability.id) | 
-                sort_by(.vulnerability.severity) | reverse[]
-              ' vulnerabilities.json 2>/dev/null > /tmp/cve_list.json
-              
-              if [ -s /tmp/cve_list.json ]; then
-                echo "✅ Found $(wc -l < /tmp/cve_list.json) CVEs to process"
-                
-                # Process each CVE - NEVER let a command fail
-                while IFS= read -r obj; do
-                  # Initialize defaults and suppress all jq errors
-                  id=$(echo "$obj" | jq -r '.vulnerability.id // "Unknown"') 2>/dev/null || id="Unknown"
-                  severity=$(echo "$obj" | jq -r '.vulnerability.severity // "Unknown"') 2>/dev/null || severity="Unknown"
-                  package=$(echo "$obj" | jq -r '.artifact.name // "Unknown"') 2>/dev/null || package="Unknown"
-                  version=$(echo "$obj" | jq -r '.artifact.version // "Unknown"') 2>/dev/null || version="Unknown"
-                  fix=$(echo "$obj" | jq -r '.vulnerability.fix.state // "unknown"') 2>/dev/null || fix="unknown"
-                  description=$(echo "$obj" | jq -r '.vulnerability.description // "No description"') 2>/dev/null || description="No description"
-                  
-                  # Additional null string cleanup
-                  severity="${severity//null/unknown}"
-                  package="${package//null/Unknown}"
-                  version="${version//null/Unknown}"
-                  fix="${fix//null/unknown}"
-                  description="${description//null/No description}"
-                  
-                  # Truncate and escape
-                  DESC_SHORT="${description:0:150}"
-                  [ ${#description} -gt 150 ] && DESC_SHORT="${DESC_SHORT}..."
-                  DESC_SAFE="${DESC_SHORT//|/\\|}"
-                  
-                  echo "| $id | $severity | $package | $version | $fix | $DESC_SAFE |" >> reports/security-report-${{ github.run_number }}.md
-                done < /tmp/cve_list.json
-              else
-                echo "⚠️ No CVE data extracted" >> reports/security-report-${{ github.run_number }}.md
-              fi
+              echo "### Detailed CVE List"
+              echo ""
+              echo "| CVE ID | Severity | Package | Version | Fix Available |"
+              echo "|--------|----------|---------|---------|---------------|"
+              jq -r '.matches[] | select(.vulnerability?.id != null) | [
+                .vulnerability.id,
+                .vulnerability.severity,
+                .artifact.name,
+                .artifact.version,
+                .vulnerability.fix.state // "unknown"
+              ] | @tsv' vulnerability-results/vulnerabilities.json 2>/dev/null | \
+              while IFS=$'\t' read -r id severity pkg version fix; do
+                printf "| %s | %s | %s | %s | %s |\n" \
+                  "$id" "$severity" "$pkg" "$version" "$fix"
+              done
             else
-              echo "✅ No CVE vulnerabilities found!" >> reports/security-report-${{ github.run_number }}.md
+              echo "✅ No CVE vulnerabilities found!"
             fi
           else
-            echo "⚠️ CVE scan results not available" >> reports/security-report-${{ github.run_number }}.md
-          fi
+            echo "⚠️ CVE scan results not available"
+          fi)
           
-          echo "" >> reports/security-report-${{ github.run_number }}.md
-          
-          # SAST Issues Section
-          cat >> reports/security-report-${{ github.run_number }}.md << 'EOF'
+          ---
           
           ## 🔬 Code Security Issues (SAST - Semgrep)
           
@@ -700,88 +623,53 @@ jobs:
           | 🟢 Low (NOTE) | ${{ needs.scan-sast.outputs.sast_low || 0 }} |
           | **Total** | **${{ needs.scan-sast.outputs.sast_issues_found || 0 }}** |
           
-          EOF
-          
-          # Detailed SAST Findings - COMPLETELY FIXED
-          if [ -f semgrep.json ]; then
-            SAST_COUNT=$(jq '.results | length' semgrep.json 2>/dev/null || echo "0")
+          $(if [ -f sast-results/semgrep.json ]; then
+            SAST_COUNT=$(jq '.results | length' sast-results/semgrep.json 2>/dev/null || echo "0")
             if [ "$SAST_COUNT" -gt 0 ]; then
-              echo "### Detailed SAST Findings" >> reports/security-report-${{ github.run_number }}.md
-              echo "" >> reports/security-report-${{ github.run_number }}.md
-              echo "| Severity | File | Line | Rule ID | Message |" >> reports/security-report-${{ github.run_number }}.md
-              echo "|----------|------|------|---------|---------|" >> reports/security-report-${{ github.run_number }}.md
-              
-              # Process SAST results with robust error suppression
-              jq -c '.results[]' semgrep.json 2>/dev/null > /tmp/sast_list.json
-              if [ -s /tmp/sast_list.json ]; then
-                while IFS= read -r obj; do
-                  severity=$(echo "$obj" | jq -r '.extra.severity // "Unknown"') 2>/dev/null || severity="Unknown"
-                  file=$(echo "$obj" | jq -r '.path // "Unknown"') 2>/dev/null || file="Unknown"
-                  line=$(echo "$obj" | jq -r '.start.line // "N/A"') 2>/dev/null || line="N/A"
-                  rule=$(echo "$obj" | jq -r '.check_id // "Unknown"') 2>/dev/null || rule="Unknown"
-                  message=$(echo "$obj" | jq -r '.extra.message // "No message"') 2>/dev/null || message="No message"
-                  
-                  MSG_SHORT="${message:0:120}"
-                  [ ${#message} -gt 120 ] && MSG_SHORT="${MSG_SHORT}..."
-                  MSG_SAFE="${MSG_SHORT//|/\\|}"
-                  
-                  echo "| $severity | $file | $line | $rule | $MSG_SAFE |" >> reports/security-report-${{ github.run_number }}.md
-                done < /tmp/sast_list.json
-              fi
+              echo "### Detailed SAST Findings"
+              echo ""
+              echo "| Severity | File | Line | Rule ID |"
+              echo "|----------|------|------|---------|"
+              jq -r '.results[] | [
+                .extra.severity,
+                .path,
+                .start.line,
+                .check_id
+              ] | @tsv' sast-results/semgrep.json 2>/dev/null | \
+              while IFS=$'\t' read -r severity file line rule; do
+                printf "| %s | %s | %s | %s |\n" "$severity" "$file" "$line" "$rule"
+              done
             else
-              echo "✅ No SAST issues found!" >> reports/security-report-${{ github.run_number }}.md
+              echo "✅ No SAST issues found!"
             fi
           else
-            echo "⚠️ SAST scan results not available" >> reports/security-report-${{ github.run_number }}.md
-          fi
+            echo "⚠️ SAST scan results not available"
+          fi)
           
-          echo "" >> reports/security-report-${{ github.run_number }}.md
-          
-          # Secrets Section
-          cat >> reports/security-report-${{ github.run_number }}.md << 'EOF'
+          ---
           
           ## 🔐 Secrets Detection (TruffleHog)
           
           | Type | Count |
           |------|-------|
-          | 🔑 Verified Secrets | ${{ needs.scan-secrets.outputs.secrets_found || 0 }} |
+          | 🔑 Total Secrets Detected | ${{ needs.scan-secrets.outputs.secrets_found || 0 }} |
+          | ✅ Verified Secrets | ${{ needs.scan-secrets.outputs.secrets_verified || 0 }} |
           
-          EOF
-          
-          if [ -f trufflehog.json ]; then
-            SECRET_COUNT=$(jq '[.[]? | select(.Verified == true)] | length' trufflehog.json 2>/dev/null || echo "0")
-            if [ "$SECRET_COUNT" -gt 0 ]; then
-              echo "### Detailed Secret Findings (Verified Only)" >> reports/security-report-${{ github.run_number }}.md
-              echo "" >> reports/security-report-${{ github.run_number }}.md
-              echo "| File | Line | Detector Type | Secret Preview |" >> reports/security-report-${{ github.run_number }}.md
-              echo "|------|------|---------------|----------------|" >> reports/security-report-${{ github.run_number }}.md
-              
-              jq -r '
-                [.[]? | select(.Verified == true)] | .[] | {
-                  file: .SourceMetadata?.Data?.Filesystem?.file // "Unknown",
-                  line: .SourceMetadata?.Data?.Filesystem?.line // "N/A",
-                  type: .DetectorName // "Unknown",
-                  secret: .Redacted // .Raw // "Hidden"
-                } | [
-                  .file,
-                  .line,
-                  .type,
-                  .secret
-                ] | @tsv
-              ' trufflehog.json 2>/dev/null | while IFS=$'\t' read -r file line type secret; do
-                SECRET_SHORT="${secret:0:50}$( [ ${#secret} -gt 50 ] && echo '...' )"
-                SECRET_SAFE="${SECRET_SHORT//|/\\|}"
-                echo "| $file | $line | $type | $SECRET_SAFE |" >> reports/security-report-${{ github.run_number }}.md
-              done
-            else
-              echo "✅ No verified secrets found!" >> reports/security-report-${{ github.run_number }}.md
-            fi
-          else
-            echo "⚠️ Secret scan results not available" >> reports/security-report-${{ github.run_number }}.md
-          fi
-          
-          # Footer
-          cat >> reports/security-report-${{ github.run_number }}.md << EOF
+          $(if [ -f secret-scan-results/trufflehog.json ] && [ "${{ needs.scan-secrets.outputs.secrets_found }}" != "0" ]; then
+            echo "### Detailed Secret Findings"
+            echo ""
+            echo "| File | Line | Detector | Verified |"
+            echo "|------|------|----------|----------|"
+            jq -r '.[] | [
+              .SourceMetadata?.Data?.Filesystem?.file // "Unknown",
+              .SourceMetadata?.Data?.Filesystem?.line // "N/A",
+              .DetectorName // "Unknown",
+              .Verified | tostring
+            ] | @tsv' secret-scan-results/trufflehog.json 2>/dev/null | \
+            while IFS=$'\t' read -r file line detector verified; do
+              printf "| %s | %s | %s | %s |\n" "$file" "$line" "$detector" "$verified"
+            done
+          fi)
           
           ---
           
@@ -791,31 +679,14 @@ jobs:
           - **Decision:** `${{ needs.policy-enforcement.outputs.policy_decision || 'UNKNOWN' }}`
           - **Violations:** ${{ needs.policy-enforcement.outputs.policy_violations || 0 }}
           - **Warnings:** ${{ needs.policy-enforcement.outputs.policy_warnings || 0 }}
-          
-          **Next Steps for Developers:**
-          1. **Review** all identified issues above
-          2. **Prioritize** Critical/High severity findings first
-          3. **Fix** vulnerabilities and rescan
-          4. **Address** policy violations before deployment
-          5. **Rerun** pipeline after fixes are applied
+          - **Policy Duration:** ${{ steps.calculate.outputs.policy_duration }}s
+          - **Total Pipeline Duration:** ${{ steps.calculate.outputs.total_duration }}s
           
           ---
-          
-          *Automated Software Supply Chain Security Framework*  
-          *Generated:$(date -u +"%Y-%m-%d %H:%M:%S UTC")*  
-          *For questions, contact your security team*
+
+          *Automated Software Supply Chain Security Report*  
+          *Generated: $(date -u +"%Y-%m-%d %H:%M:%S UTC")*
           EOF
-          
-          echo "✅ Consolidated security report generated"
-          echo "📄 Report size: $(wc -c < reports/security-report-${{ github.run_number }}.md) bytes"
-
-      - name: "⏱️ Add Performance to Summary"
-        if: always()
-        run: |
-          echo "## ⏱️ Pipeline Performance" >> $GITHUB_STEP_SUMMARY
-          echo "- **Total Duration:** ${{ steps.calculate.outputs.total_duration }} seconds" >> $GITHUB_STEP_SUMMARY
-          echo "- **Policy Check:** ${{ steps.calculate.outputs.policy_duration }} seconds" >> $GITHUB_STEP_SUMMARY
-
 
       - name: "💾 Upload Consolidated Report"
         uses: actions/upload-artifact@v4
@@ -824,8 +695,7 @@ jobs:
           path: reports/
           retention-days: 90
 
-      - name: "📊 Generate GitHub Step Summary"
+      - name: "📊 Publish GitHub Step Summary"
         if: always()
         run: |
-          # Use the report content for step summary (truncated version)
-          cat reports/security-report-${{ github.run_number }}.md >> $GITHUB_STEP_SUMMARY
+          cat "reports/security-report-${{ github.run_number }}.md" >> "$GITHUB_STEP_SUMMARY"
