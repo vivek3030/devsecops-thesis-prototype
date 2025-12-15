@@ -212,7 +212,7 @@ jobs:
             CRITICAL=$(jq '[.matches[] | select(.vulnerability.severity | test("critical"; "i"))] | length' vulnerabilities.json 2>/dev/null || echo "0")
             HIGH=$(jq '[.matches[] | select(.vulnerability.severity | test("high"; "i"))] | length' vulnerabilities.json 2>/dev/null || echo "0")
             MEDIUM=$(jq '[.matches[] | select(.vulnerability.severity | test("medium"; "i"))] | length' vulnerabilities.json 2>/dev/null || echo "0")
-            LOW=$(jq '[.matches[] | select(.vulnerability.severity | test("low|negligible|unknown|info"; "i"))] | length' vulnerabilities.json 2>/dev/null || echo "0")
+            LOW=$(jq '[.matches[] | select(.vulnerability.severity | test("^low$"; "i"))] | length' vulnerabilities.json 2>/dev/null || echo "0")
             TOTAL=$((CRITICAL + HIGH + MEDIUM + LOW))
           else
             TOTAL=0; CRITICAL=0; HIGH=0; MEDIUM=0; LOW=0
@@ -571,7 +571,7 @@ jobs:
           |-----------|--------------|--------|
           | 🔍 CVE Vulnerabilities | ${{ needs.scan-vulnerabilities.outputs.vulnerabilities_found || 0 }} | ${{ needs.scan-vulnerabilities.outputs.vulnerabilities_found != '0' && '⚠️ Action Required' || '✅ Clean' }} |
           | 🔬 Code Security (SAST) | ${{ needs.scan-sast.outputs.sast_issues_found || 0 }} | ${{ needs.scan-sast.outputs.sast_issues_found != '0' && '⚠️ Review Needed' || '✅ Clean' }} |
-          | 🔐 Secrets Detected | ${{ needs.scan-secrets.outputs.secrets_found || 0 }} (${{ needs.scan-secrets.outputs.secrets_verified || 0 }} verified) | ${{ needs.scan-secrets.outputs.secrets_found != '0' && '🚨 Immediate Action' || '✅ Clean' }} |
+          | 🔐 Secrets Detected | ${{ needs.scan-secrets.outputs.secrets_verified || 0 }} | ${{ needs.scan-secrets.outputs.secrets_verified != '0' && '🚨 Immediate Action' || '✅ Clean' }} |
           | 🛡️ Policy Compliance | ${{ needs.policy-enforcement.outputs.policy_violations || 0 }} violations | ${{ needs.policy-enforcement.outputs.policy_result == 'true' && '✅ PASSED' || '❌ FAILED' }} |
           
           ---
@@ -589,11 +589,12 @@ jobs:
           $(if [ -f vulnerability-results/vulnerabilities.json ]; then
             VULN_COUNT=$(jq '[.matches[]?.vulnerability?.id] | unique | length' vulnerability-results/vulnerabilities.json 2>/dev/null || echo "0")
             if [ "$VULN_COUNT" -gt 0 ]; then
-              echo "### Detailed CVE List"
+              echo "### Detailed CVE List (Critical/High/Medium/Low only)"
               echo ""
               echo "| CVE ID | Severity | Package | Version | Fix Available |"
               echo "|--------|----------|---------|---------|---------------|"
-              jq -r '.matches[] | select(.vulnerability?.id != null) | [
+              # Filter out Unknown and Negligible from detailed list
+              jq -r '.matches[] | select(.vulnerability.severity | test("critical|high|medium|low"; "i")) | [
                 .vulnerability.id,
                 .vulnerability.severity,
                 .artifact.name,
@@ -601,8 +602,7 @@ jobs:
                 .vulnerability.fix.state // "unknown"
               ] | @tsv' vulnerability-results/vulnerabilities.json 2>/dev/null | \
               while IFS=$'\t' read -r id severity pkg version fix; do
-                printf "| %s | %s | %s | %s | %s |\n" \
-                  "$id" "$severity" "$pkg" "$version" "$fix"
+                printf "| %s | %s | %s | %s | %s |\n" "$id" "$severity" "$pkg" "$version" "$fix"
               done
             else
               echo "✅ No CVE vulnerabilities found!"
@@ -652,22 +652,20 @@ jobs:
           
           | Type | Count |
           |------|-------|
-          | 🔑 Total Secrets Detected | ${{ needs.scan-secrets.outputs.secrets_found || 0 }} |
-          | ✅ Verified Secrets | ${{ needs.scan-secrets.outputs.secrets_verified || 0 }} |
+          | 🔑 Verified Secrets | ${{ needs.scan-secrets.outputs.secrets_verified || 0 }} |
           
-          $(if [ -f secret-scan-results/trufflehog.json ] && [ "${{ needs.scan-secrets.outputs.secrets_found }}" != "0" ]; then
-            echo "### Detailed Secret Findings"
+          $(if [ -f secret-scan-results/trufflehog.json ] && [ "${{ needs.scan-secrets.outputs.secrets_verified }}" != "0" ]; then
+            echo "### Detailed Secret Findings (Verified Only)"
             echo ""
-            echo "| File | Line | Detector | Verified |"
-            echo "|------|------|----------|----------|"
-            jq -r '.[] | [
+            echo "| File | Line | Detector |"
+            echo "|------|------|----------|"
+            jq -r '.[] | select(.Verified == true) | [
               .SourceMetadata?.Data?.Filesystem?.file // "Unknown",
               .SourceMetadata?.Data?.Filesystem?.line // "N/A",
-              .DetectorName // "Unknown",
-              .Verified | tostring
+              .DetectorName // "Unknown"
             ] | @tsv' secret-scan-results/trufflehog.json 2>/dev/null | \
-            while IFS=$'\t' read -r file line detector verified; do
-              printf "| %s | %s | %s | %s |\n" "$file" "$line" "$detector" "$verified"
+            while IFS=$'\t' read -r file line detector; do
+              printf "| %s | %s | %s |\n" "$file" "$line" "$detector"
             done
           fi)
           
@@ -683,7 +681,7 @@ jobs:
           - **Total Pipeline Duration:** ${{ steps.calculate.outputs.total_duration }}s
           
           ---
-
+          
           *Automated Software Supply Chain Security Report*  
           *Generated: $(date -u +"%Y-%m-%d %H:%M:%S UTC")*
           EOF
