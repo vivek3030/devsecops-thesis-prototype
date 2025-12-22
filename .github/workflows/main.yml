@@ -697,3 +697,13 @@ jobs:
         if: always()
         run: |
           cat "reports/security-report-${{ github.run_number }}.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Send report to dashboard
+        run: |
+          curl -X POST \
+            "https://vtbgzuazgpbyrxejyhwd.supabase.co/functions/v1/pipeline-webhook" \
+            -H "Content-Type: application/json" \
+            -H "X-Webhook-Secret: ${{ secrets.PIPELINE_WEBHOOK_SECRET }}" \
+            -d '{"run_number": ${{ github.run_number }}, ...}'
+        env:
+          PIPELINE_WEBHOOK_SECRET: ${{ secrets.PIPELINE_WEBHOOK_SECRET }}
