@@ -700,43 +700,45 @@ jobs:
 
       - name: Send report to dashboard
         run: |
-          SBOM_COMPONENTS=$(cat reports/sbom/bom.json | jq '[.components[] | {name: .name, version: .version, type: .type, licenses: [.licenses[]?.license.id // "Unknown"]}]')  
+          SBOM_COMPONENTS=$(cat reports/sbom/bom.json | jq -c '[.components[] | {name: .name, version: .version, type: .type, licenses: [.licenses[]?.license.id // "Unknown"]}]')
           
-          VULNERABILITIES=$(cat reports/vulnerability-results/vulnerabilities.json | jq '[.Results[]?.Vulnerabilities[]? | {id: .VulnerabilityID, severity: .Severity, package: .PkgName, version: .InstalledVersion, fixAvailable: (.FixedVersion != null)}]')
+          VULNERABILITIES=$(cat reports/vulnerability-results/vulnerabilities.json | jq -c '[.Results[]?.Vulnerabilities[]? | {id: .VulnerabilityID, severity: (.Severity | ascii_downcase), package: .PkgName, version: .InstalledVersion, fixAvailable: (.FixedVersion != null)}]')
 
           curl -X POST \
             "https://vtbgzuazgpbyrxejyhwd.supabase.co/functions/v1/pipeline-webhook" \
             -H "Content-Type: application/json" \
             -H "x-webhook-secret: ${{ secrets.PIPELINE_WEBHOOK_SECRET }}" \
-            -d '{
-              "run_number": ${{ github.run_number }},
-              "version": "${{ needs.prepare.outputs.version }}",
-              "commit_hash": "${{ github.sha }}",
-              "image_ref": "${{ needs.build-container.outputs.image_ref }}",
-              "image_digest": "${{ needs.build-container.outputs.image_digest }}",
-              "slsa_level": 3,
-              "provenance_verified": ${{ needs.build-container.result == 'success' }},
-              "hermetic_build": false,
-              "signed": true,
-              "sbom_components_count": ${{ needs.scan-vulnerabilities.outputs.sbom_components_count || 0 }},
-              "vuln_critical": ${{ needs.scan-vulnerabilities.outputs.critical_count || 0 }},
-              "vuln_high": ${{ needs.scan-vulnerabilities.outputs.high_count || 0 }},
-              "vuln_medium": ${{ needs.scan-vulnerabilities.outputs.medium_count || 0 }},
-              "vuln_low": ${{ needs.scan-vulnerabilities.outputs.low_count || 0 }},
-              "vuln_total": ${{ needs.scan-vulnerabilities.outputs.vulnerabilities_found || 0 }},
-              "sast_critical": ${{ needs.scan-sast.outputs.sast_critical || 0 }},
-              "sast_high": ${{ needs.scan-sast.outputs.sast_high || 0 }},
-              "sast_medium": ${{ needs.scan-sast.outputs.sast_medium || 0 }},
-              "sast_low": ${{ needs.scan-sast.outputs.sast_low || 0 }},
-              "sast_total": ${{ needs.scan-sast.outputs.sast_issues_found || 0 }},
-              "secrets_found": ${{ needs.scan-secrets.outputs.secrets_found || 0 }},
-              "secrets_verified": ${{ needs.scan-secrets.outputs.secrets_verified || 0 }},
-              "policy_passed": ${{ needs.policy-enforcement.outputs.policy_result == 'true' }},
-              "policy_violations": ${{ needs.policy-enforcement.outputs.policy_violations || 0 }},
-              "policy_warnings": ${{ needs.policy-enforcement.outputs.policy_warnings || 0 }},
-              "policy_decision": "${{ needs.policy-enforcement.outputs.policy_decision || 'PENDING' }}",
-              "raw_report\": {
-                \"sbom_components\": $SBOM_COMPONENTS,
-                \"vulnerabilities\": $VULNERABILITIES
-              }
-            }'
+            -d @- <<EOF
+          {
+            "run_number": ${{ github.run_number }},
+            "version": "${{ needs.prepare.outputs.version }}",
+            "commit_hash": "${{ github.sha }}",
+            "image_ref": "${{ needs.build-container.outputs.image_ref }}",
+            "image_digest": "${{ needs.build-container.outputs.image_digest }}",
+            "slsa_level": 3,
+            "provenance_verified": ${{ needs.build-container.result == 'success' }},
+            "hermetic_build": false,
+            "signed": true,
+            "sbom_components_count": ${{ needs.scan-vulnerabilities.outputs.sbom_components_count || 0 }},
+            "vuln_critical": ${{ needs.scan-vulnerabilities.outputs.critical_count || 0 }},
+            "vuln_high": ${{ needs.scan-vulnerabilities.outputs.high_count || 0 }},
+            "vuln_medium": ${{ needs.scan-vulnerabilities.outputs.medium_count || 0 }},
+            "vuln_low": ${{ needs.scan-vulnerabilities.outputs.low_count || 0 }},
+            "vuln_total": ${{ needs.scan-vulnerabilities.outputs.vulnerabilities_found || 0 }},
+            "sast_critical": ${{ needs.scan-sast.outputs.sast_critical || 0 }},
+            "sast_high": ${{ needs.scan-sast.outputs.sast_high || 0 }},
+            "sast_medium": ${{ needs.scan-sast.outputs.sast_medium || 0 }},
+            "sast_low": ${{ needs.scan-sast.outputs.sast_low || 0 }},
+            "sast_total": ${{ needs.scan-sast.outputs.sast_issues_found || 0 }},
+            "secrets_found": ${{ needs.scan-secrets.outputs.secrets_found || 0 }},
+            "secrets_verified": ${{ needs.scan-secrets.outputs.secrets_verified || 0 }},
+            "policy_passed": ${{ needs.policy-enforcement.outputs.policy_result == 'true' }},
+            "policy_violations": ${{ needs.policy-enforcement.outputs.policy_violations || 0 }},
+            "policy_warnings": ${{ needs.policy-enforcement.outputs.policy_warnings || 0 }},
+            "policy_decision": "${{ needs.policy-enforcement.outputs.policy_decision || 'PENDING' }}",
+            "raw_report": {
+              "sbom_components": ${SBOM_COMPONENTS},
+              "vulnerabilities": ${VULNERABILITIES}
+            }
+          }
+          EOF
