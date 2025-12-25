@@ -700,6 +700,10 @@ jobs:
 
       - name: Send report to dashboard
         run: |
+          SBOM_COMPONENTS=$(cat reports/sbom/bom.json | jq '[.components[] | {name: .name, version: .version, type: .type, licenses: [.licenses[]?.license.id // "Unknown"]}]')  
+          
+          VULNERABILITIES=$(cat reports/vulnerability-results/vulnerabilities.json | jq '[.Results[]?.Vulnerabilities[]? | {id: .VulnerabilityID, severity: .Severity, package: .PkgName, version: .InstalledVersion, fixAvailable: (.FixedVersion != null)}]')
+
           curl -X POST \
             "https://vtbgzuazgpbyrxejyhwd.supabase.co/functions/v1/pipeline-webhook" \
             -H "Content-Type: application/json" \
@@ -731,8 +735,8 @@ jobs:
               "policy_violations": ${{ needs.policy-enforcement.outputs.policy_violations || 0 }},
               "policy_warnings": ${{ needs.policy-enforcement.outputs.policy_warnings || 0 }},
               "policy_decision": "${{ needs.policy-enforcement.outputs.policy_decision || 'PENDING' }}",
-              "raw_report": {
-                  "sbom_components": [{"name": "react", "version": "18.2.0", "type": "npm", "licenses": ["MIT"]}],
-                  "vulnerabilities": [{"id": "CVE-2024-1234", "severity": "high", "package": "lodash", "version": "4.17.20", "fixAvailable": true}]
+              "raw_report\": {
+                \"sbom_components\": $SBOM_COMPONENTS,
+                \"vulnerabilities\": $VULNERABILITIES
               }
             }'
