@@ -730,5 +730,9 @@ jobs:
               "policy_passed": ${{ needs.policy-enforcement.outputs.policy_result == 'true' }},
               "policy_violations": ${{ needs.policy-enforcement.outputs.policy_violations || 0 }},
               "policy_warnings": ${{ needs.policy-enforcement.outputs.policy_warnings || 0 }},
-              "policy_decision": "${{ needs.policy-enforcement.outputs.policy_decision || 'PENDING' }}"
+              "policy_decision": "${{ needs.policy-enforcement.outputs.policy_decision || 'PENDING' }}",
+              "raw_report": {
+                  "sbom_components": [{"name": "react", "version": "18.2.0", "type": "npm", "licenses": ["MIT"]}],
+                  "vulnerabilities": [{"id": "CVE-2024-1234", "severity": "high", "package": "lodash", "version": "4.17.20", "fixAvailable": true}]
+              }
             }'
