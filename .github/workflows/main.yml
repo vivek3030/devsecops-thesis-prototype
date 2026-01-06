@@ -773,9 +773,16 @@ jobs:
           fi
           
           # Add new report (keep last 50)
-          echo "$REPORT" | jq --slurpfile existing "$REPORTS_FILE" \
-            '$existing[0].reports = [.] + $existing[0].reports | $existing[0].reports = $existing[0].reports[:50] | $existing[0]' \
-            > tmp.json && mv tmp.json "$REPORTS_FILE"
+          REPORTS_FILE="public/data/security-reports.json"
+          mkdir -p public/data
+          if [ ! -f "$REPORTS_FILE" ]; then
+            echo '{"reports":[]}' > "$REPORTS_FILE"
+          fi
+
+          jq --argjson new "$REPORT" \
+            '.reports = [$new] + (.reports // []) | .reports = .reports[:50]' \
+            "$REPORTS_FILE" > tmp.json && mv tmp.json "$REPORTS_FILE"
+
           
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
