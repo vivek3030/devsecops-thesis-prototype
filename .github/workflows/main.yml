@@ -789,3 +789,10 @@ jobs:
           git add public/data/security-reports.json
           git diff --staged --quiet || git commit -m "chore: update security report #${{ github.run_number }} [skip ci]"
           git push
+        
+      - name: Trigger Vercel Deployment
+        env:
+            VERCEL_DEPLOY_HOOK: ${{ secrets.VERCEL_DEPLOY_HOOK }}
+        run: |
+          if: needs.policy-enforcement.outputs.policy_result == 'true'
+          curl -X POST "${ VERCEL_DEPLOY_HOOK }"
