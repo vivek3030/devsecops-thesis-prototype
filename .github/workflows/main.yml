@@ -761,7 +761,7 @@ jobs:
             }')
           
           # Clone dashboard repo and update JSON
-          git clone https://x-access-token:${GH_TOKEN}@github.com/vivek3030/slsa-guardian.git dashboard
+          git clone https://x-access-token:${secrets.GITHUB_TOKEN}@github.com/vivek3030/slsa-guardian.git dashboard
           cd dashboard
           
           mkdir -p public/data
