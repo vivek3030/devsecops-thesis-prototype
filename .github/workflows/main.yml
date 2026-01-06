@@ -12,7 +12,7 @@ env:
   IMAGE_REPO: ${{ github.repository }}
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   # ============================================
@@ -325,7 +325,7 @@ jobs:
           fi
           echo "total=${TOTAL}" >> "$GITHUB_OUTPUT"
           echo "verified=${VERIFIED}" >> "$GITHUB_OUTPUT"
-          echo "🔐 Secrets: ${TOTAL} total, ${verified} verified"
+          echo "🔐 Secrets: ${TOTAL} total, ${VERIFIED} verified"
 
       - name: "💾 Upload Secret Scan Results"
         uses: actions/upload-artifact@v4
@@ -698,16 +698,18 @@ jobs:
         run: |
           cat "reports/security-report-${{ github.run_number }}.md" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Send report to dashboard
+      - name: "📤 Update Dashboard Data (JSON)"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          SBOM_COMPONENTS=$(jq -c '[.components[]? | {name, version, type, licenses: [.licenses[]?.license.id // "Unknown"]}] // []' reports/sbom/bom.json 2>/dev/null || echo '[]')
-          VULNERABILITIES=$(jq -c '[.Results[]?.Vulnerabilities[]? | {id: .VulnerabilityID, severity: (.Severity|ascii_downcase), package: .PkgName, version: .InstalledVersion, fixAvailable: (.FixedVersion != null)}] // []' reports/vulnerability-results/vulnerabilities.json 2>/dev/null || echo '[]')
-
-          jq -n \
+          # Generate report JSON
+          REPORT=$(jq -n \
+            --arg id "run-${{ github.run_number }}-$(date +%s)" \
             --arg version "${{ needs.prepare.outputs.version }}" \
             --arg commit_hash "${{ github.sha }}" \
             --arg image_ref "${{ needs.build-container.outputs.image_ref }}" \
             --arg image_digest "${{ needs.build-container.outputs.image_digest }}" \
+            --arg created_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
             --argjson run_number ${{ github.run_number }} \
             --argjson provenance_verified ${{ needs.build-container.result == 'success' }} \
             --argjson sbom_components_count ${{ needs.scan-vulnerabilities.outputs.sbom_components_count || 0 }} \
@@ -727,14 +729,12 @@ jobs:
             --argjson policy_violations ${{ needs.policy-enforcement.outputs.policy_violations || 0 }} \
             --argjson policy_warnings ${{ needs.policy-enforcement.outputs.policy_warnings || 0 }} \
             --arg policy_decision "${{ needs.policy-enforcement.outputs.policy_decision || 'PENDING' }}" \
-            --argjson sbom_components "$SBOM_COMPONENTS" \
-            --argjson vulnerabilities "$VULNERABILITIES" \
             '{
+              id: $id,
               run_number: $run_number,
               version: $version,
               commit_hash: $commit_hash,
-              image_ref: $image_ref,
-              image_digest: $image_digest,
+              created_at: $created_at,
               slsa_level: 3,
               provenance_verified: $provenance_verified,
               hermetic_build: false,
@@ -756,10 +756,29 @@ jobs:
               policy_violations: $policy_violations,
               policy_warnings: $policy_warnings,
               policy_decision: $policy_decision,
-              raw_report: { sbom_components: $sbom_components, vulnerabilities: $vulnerabilities }
-            }' \
-          | curl -sS -X POST "https://vtbgzuazgpbyrxejyhwd.supabase.co/functions/v1/pipeline-webhook" \
-              -H "Content-Type: application/json" \
-              -H "x-webhook-secret: ${{ secrets.PIPELINE_WEBHOOK_SECRET }}" \
-              --data-binary @-
-
+              image_ref: $image_ref,
+              image_digest: $image_digest
+            }')
+          
+          # Clone dashboard repo and update JSON
+          git clone https://x-access-token:${GH_TOKEN}@github.com/vivek3030/slsa-guardian.git dashboard
+          cd dashboard
+          
+          mkdir -p public/data
+          REPORTS_FILE="public/data/security-reports.json"
+          
+          # Initialize if doesn't exist
+          if [ ! -f "$REPORTS_FILE" ]; then
+            echo '{"reports": []}' > "$REPORTS_FILE"
+          fi
+          
+          # Add new report (keep last 50)
+          echo "$REPORT" | jq --slurpfile existing "$REPORTS_FILE" \
+            '$existing[0].reports = [.] + $existing[0].reports | $existing[0].reports = $existing[0].reports[:50] | $existing[0]' \
+            > tmp.json && mv tmp.json "$REPORTS_FILE"
+          
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add public/data/security-reports.json
+          git diff --staged --quiet || git commit -m "chore: update security report #${{ github.run_number }} [skip ci]"
+          git push
