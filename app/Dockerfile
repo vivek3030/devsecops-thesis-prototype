@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.13-slim
 
 # ✅ FIXED: Upgraded Python version to 3.11 (CVE-2023-36632, CVE-2025-12084)
 # Minimal dependencies, removed unnecessary packages like vim
