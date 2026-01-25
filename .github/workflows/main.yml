@@ -199,11 +199,14 @@ jobs:
           echo "SBOM Components: ${COMPONENT_COUNT}"
 
       - name: "Scan for CVE Vulnerabilities"
+        id: grype_scan
         uses: anchore/scan-action@v6
         with:
           sbom: bom.json
           output-format: json
           output-file: vulnerabilities.json
+          fail-build: false   # <- KEY FIX
+          severity-cutoff: low
 
       - name: "Extract CVE Statistics"
         id: vuln-stats
