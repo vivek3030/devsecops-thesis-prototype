@@ -1,4 +1,3 @@
-# Builder
 FROM python:3.13.11-slim-bookworm AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -9,33 +8,27 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 COPY requirements.txt .
-
 RUN python -m venv /opt/venv \
  && /opt/venv/bin/python -m pip install --upgrade pip \
  && /opt/venv/bin/python -m pip install -r requirements.txt
 
-# Runtime
-FROM python:3.13.11-slim-bookworm AS runtime
+COPY . .
+
+# Distroless runtime with C libs (no shell). We'll bring our own Python from builder.
+FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PATH="/opt/venv/bin:$PATH"
-
-# Patch OS packages to reduce base-image CVEs
-RUN apt-get update \
- && apt-get upgrade -y \
- && apt-get clean \
- && rm -rf /var/lib/apt/lists/*
+    PATH="/opt/venv/bin:/usr/local/bin:$PATH"
 
 WORKDIR /app
 
-RUN useradd --system --uid 1000 --create-home --home-dir /home/appuser appuser
+# Copy Python interpreter + stdlib from builder
+COPY --from=builder /usr/local /usr/local
 
+# Copy venv + app
 COPY --from=builder /opt/venv /opt/venv
-COPY --chown=appuser:appuser . .
-
-USER appuser
+COPY --from=builder /app /app
 
 EXPOSE 5000
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--log-level", "info", "app:app"]
+CMD ["python", "-m", "gunicorn", "--bind", "0.0.0.0:5000", "--log-level", "info", "app:app"]
