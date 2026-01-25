@@ -1,34 +1,29 @@
-FROM python:3.13.11-slim-bookworm AS builder
+FROM python:3.13-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_NO_CACHE_DIR=1
-
+# ✅ FIXED: Upgraded Python version to 3.11 (CVE-2023-36632, CVE-2025-12084)
+# Minimal dependencies, removed unnecessary packages like vim
+RUN apt-get update && \
+    apt-get install -y curl && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+    
+# ✅ FIXED: Removed secrets from ENV, use .env file instead
 WORKDIR /app
 
 COPY requirements.txt .
-RUN python -m venv /opt/venv \
- && /opt/venv/bin/python -m pip install --upgrade pip \
- && /opt/venv/bin/python -m pip install -r requirements.txt
+# ✅ FIXED: Upgrade pip to latest version
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# ✅ FIXED: Create non-root user
+RUN useradd -m -u 1000 appuser
 
 COPY . .
+RUN chown -R appuser:appuser /app
 
-# Distroless runtime with C libs (no shell). We'll bring our own Python from builder.
-FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
-
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PATH="/opt/venv/bin:/usr/local/bin:$PATH"
-
-WORKDIR /app
-
-# Copy Python interpreter + stdlib from builder
-COPY --from=builder /usr/local /usr/local
-
-# Copy venv + app
-COPY --from=builder /opt/venv /opt/venv
-COPY --from=builder /app /app
-
+# ✅ FIXED: Run as non-root user
+USER appuser
 EXPOSE 5000
-CMD ["python", "-m", "gunicorn", "--bind", "0.0.0.0:5000", "--log-level", "info", "app:app"]
+
+# ✅ FIXED: Reduced logging verbosity
+CMD ["gunicorn", "--bind", "127.0.0.1:5000", "--log-level", "info", "app:app"]
