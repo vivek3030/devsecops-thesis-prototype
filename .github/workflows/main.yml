@@ -19,7 +19,7 @@ jobs:
   # Stage 1: Prepare & Verify Source
   # ============================================
   prepare:
-    name: "1️⃣ Prepare & Verify Source"
+    name: "Prepare & Verify Source"
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -32,43 +32,43 @@ jobs:
       image_tag: ${{ steps.image-info.outputs.image_tag }}
 
     steps:
-      - name: "⏱️ Record Start Time"
+      - name: "Record Start Time"
         id: start-time
         run: echo "time=$(date +%s)" >> "$GITHUB_OUTPUT"
 
-      - name: "📋 Checkout Repository"
+      - name: "Checkout Repository"
         uses: actions/checkout@v4
 
-      - name: "🏷️ Generate Version"
+      - name: "Generate Version"
         id: version
         run: |
           VERSION="v1.0.${{ github.run_number }}-${GITHUB_SHA::8}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "🏷️ Version: ${VERSION}"
+          echo "Version: ${VERSION}"
 
-      - name: "🏷️ Set Image Information"
+      - name: "Set Image Information"
         id: image-info
         run: |
           IMAGE_NAME="${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPO }}"
           IMAGE_TAG="${{ steps.version.outputs.version }}"
           echo "image_name=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
           echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
-          echo "🏷️ Image Name: ${IMAGE_NAME}"
-          echo "🏷️ Image Tag: ${IMAGE_TAG}"
+          echo "Image Name: ${IMAGE_NAME}"
+          echo "Image Tag: ${IMAGE_TAG}"
 
-      - name: "✅ Verify Source Files"
+      - name: "Verify Source Files"
         run: |
           if [[ ! -d app ]]; then
-            echo "❌ Error: app directory missing."
+            echo "Error: app directory missing."
             exit 1
           fi
-          echo "✅ Source files verified"
+          echo "Source files verified"
 
   # ============================================
   # Stage 2: Build Container Image (SLSA L3)
   # ============================================
   build-container:
-    name: "2️⃣ Build & Sign Container Image"
+    name: "Build & Sign Container Image"
     needs: [prepare]
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -83,20 +83,20 @@ jobs:
       image_ref: ${{ steps.image-ref.outputs.ref }}
 
     steps:
-      - name: "📋 Checkout Repository"
+      - name: "Checkout Repository"
         uses: actions/checkout@v4
 
-      - name: "🔐 Log in to GitHub Container Registry"
+      - name: "Log in to GitHub Container Registry"
         uses: docker/login-action@v3
         with:
           registry: ${{ env.IMAGE_REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: "🗝️ Set up Docker Buildx"
+      - name: "Set up Docker Buildx"
         uses: docker/setup-buildx-action@v3
 
-      - name: "🐳 Build and Push Docker Image"
+      - name: "Build and Push Docker Image"
         id: build
         uses: docker/build-push-action@v5
         with:
@@ -114,40 +114,42 @@ jobs:
             BUILD_DATE=${{ needs.prepare.outputs.build_start_time }}
             VCS_REF=${{ github.sha }}
 
-      - name: "🔍 Get Image Digest"
+      - name: "Get Image Digest"
         id: image-ref
         run: |
           DIGEST="${{ steps.build.outputs.digest }}"
           IMAGE_REF="${{ needs.prepare.outputs.image_name }}@${DIGEST}"
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
           echo "ref=${IMAGE_REF}" >> "$GITHUB_OUTPUT"
-          echo "🔍 Image Digest: ${DIGEST}"
-          echo "🔍 Image Ref: ${IMAGE_REF}"
+          echo "Image Digest: ${DIGEST}"
+          echo "Image Ref: ${IMAGE_REF}"
 
-      - name: "🔐 Install Cosign"
+      - name: "Install Cosign"
         uses: sigstore/cosign-installer@v3
 
-      - name: "✏️ Sign Container Image"
+      - name: "Sign Container Image"
         run: |
           cosign sign --yes "${{ steps.image-ref.outputs.ref }}"
 
-      - name: "📦 Generate SBOM with Syft"
-        run: |
-          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
-          syft "${{ steps.image-ref.outputs.ref }}" -o cyclonedx-json > bom.json
+      - name: "📦 Generate SBOM (Pinned Action)"
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ steps.image-ref.outputs.ref }}
+          format: cyclonedx-json
+          output-file: bom.json
 
-      - name: "🔎 Attach SBOM Attestation"
+      - name: "Attach SBOM Attestation"
         run: |
           cosign attest --yes --type cyclonedx --predicate bom.json "${{ steps.image-ref.outputs.ref }}"
 
-      - name: "💾 Upload SBOM Artifact"
+      - name: "Upload SBOM Artifact"
         uses: actions/upload-artifact@v4
         with:
           name: sbom
           path: bom.json
           retention-days: 90
 
-      - name: "🔐 Verify Signature"
+      - name: "Verify Signature"
         run: |
           cosign verify \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
@@ -158,7 +160,7 @@ jobs:
   # Stage 3a: Vulnerability Scanning (Parallel)
   # ============================================
   scan-vulnerabilities:
-    name: "3️⃣a SBOM & Vulnerability Scan"
+    name: "SBOM & Vulnerability Scan"
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: [build-container]
@@ -174,37 +176,36 @@ jobs:
       low_count: ${{ steps.vuln-stats.outputs.low }}
 
     steps:
-      - name: "🔐 Log in to GHCR"
+      - name: "Log in to GHCR"
         uses: docker/login-action@v3
         with:
           registry: ${{ env.IMAGE_REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: "⬇️ Pull Signed Image"
+      - name: "Pull Signed Image"
         run: docker pull "${{ needs.build-container.outputs.image_ref }}"
 
-      - name: "⬇️ Download SBOM"
+      - name: "Download SBOM"
         uses: actions/download-artifact@v4
         with:
           name: sbom
 
-      - name: "🔍 Install Grype Scanner"
-        run: |
-          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
-
-      - name: "📈 Extract SBOM Statistics"
+      - name: "Extract SBOM Statistics"
         id: sbom-stats
         run: |
           COMPONENT_COUNT=$(jq '.components | length' bom.json 2>/dev/null || echo "0")
           echo "count=${COMPONENT_COUNT}" >> "$GITHUB_OUTPUT"
-          echo "📦 SBOM Components: ${COMPONENT_COUNT}"
+          echo "SBOM Components: ${COMPONENT_COUNT}"
 
-      - name: "🔍 Scan for CVE Vulnerabilities"
-        run: |
-          grype sbom:bom.json -o json > vulnerabilities.json || echo '{"matches": []}' > vulnerabilities.json
+      - name: "Scan for CVE Vulnerabilities"
+        uses: anchore/scan-action@v6
+        with:
+          sbom: bom.json
+          output-format: json
+          output-file: vulnerabilities.json
 
-      - name: "📉 Extract CVE Statistics"
+      - name: "Extract CVE Statistics"
         id: vuln-stats
         run: |
           if [ -f vulnerabilities.json ]; then
@@ -222,9 +223,9 @@ jobs:
           echo "high=${HIGH}" >> "$GITHUB_OUTPUT"
           echo "medium=${MEDIUM}" >> "$GITHUB_OUTPUT"
           echo "low=${LOW}" >> "$GITHUB_OUTPUT"
-          echo "🔍 CVE Count: ${TOTAL} (C:${CRITICAL} H:${HIGH} M:${MEDIUM} L:${LOW})"
+          echo "CVE Count: ${TOTAL} (C:${CRITICAL} H:${HIGH} M:${MEDIUM} L:${LOW})"
 
-      - name: "💾 Upload Vulnerability Results"
+      - name: "Upload Vulnerability Results"
         uses: actions/upload-artifact@v4
         with:
           name: vulnerability-results
@@ -235,7 +236,7 @@ jobs:
   # Stage 3b: SAST Scan (Parallel)
   # ============================================
   scan-sast:
-    name: "3️⃣b SAST Code Scan"
+    name: "SAST Code Scan"
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: [prepare]
@@ -249,19 +250,20 @@ jobs:
       sast_low: ${{ steps.sast-stats.outputs.low }}
 
     steps:
-      - name: "📋 Checkout Repository"
+      - name: "Checkout Repository"
         uses: actions/checkout@v4
 
-      - name: "🔬 Install Semgrep"
+      - name: "Install Semgrep"
         run: |
-          python3 -m pip install semgrep
+          python3 -m pip install --upgrade pip
+          python3 -m pip install "semgrep==1.149.0"
 
-      - name: "🔬 Run Semgrep SAST Scan"
+      - name: "Run Semgrep SAST Scan"
         run: |
           # Use curated security rules only, avoid noisy experimental rules
           semgrep scan --config=p/security-audit --config=p/secrets --json --output=semgrep.json || true
 
-      - name: "📊 Extract SAST Statistics"
+      - name: "Extract SAST Statistics"
         id: sast-stats
         run: |
           if [ -f semgrep.json ]; then
@@ -278,9 +280,9 @@ jobs:
           echo "high=${HIGH}" >> "$GITHUB_OUTPUT"
           echo "medium=${MEDIUM}" >> "$GITHUB_OUTPUT"
           echo "low=${LOW}" >> "$GITHUB_OUTPUT"
-          echo "🔬 SAST Issues: ${TOTAL} (C:${CRITICAL} H:${HIGH} M:${MEDIUM} L:${LOW})"
+          echo "SAST Issues: ${TOTAL} (C:${CRITICAL} H:${HIGH} M:${MEDIUM} L:${LOW})"
 
-      - name: "💾 Upload SAST Results"
+      - name: "Upload SAST Results"
         uses: actions/upload-artifact@v4
         with:
           name: sast-results
@@ -291,7 +293,7 @@ jobs:
   # Stage 3c: Secret Scanning (Parallel)
   # ============================================
   scan-secrets:
-    name: "3️⃣c Secret Detection"
+    name: "Secret Detection"
     runs-on: ubuntu-latest
     timeout-minutes: 5
     needs: [prepare]
@@ -302,18 +304,15 @@ jobs:
       secrets_verified: ${{ steps.secret-stats.outputs.verified }}
 
     steps:
-      - name: "📋 Checkout Repository"
+      - name: "Checkout Repository"
         uses: actions/checkout@v4
 
-      - name: "🔐 Install TruffleHog"
+      - name: "🔐 TruffleHog Secret Scan (Pinned Container)"
         run: |
-          curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin
+          docker run --rm -v "$PWD:/repo" -w /repo trufflesecurity/trufflehog:3.16.0 \
+            filesystem . --only-verified --json > trufflehog.json || true
 
-      - name: "🔐 Run TruffleHog Secret Scan"
-        run: |
-          trufflehog filesystem . --include-detectors="AWS,GitHub,PrivateKey" --json > trufflehog.json || true
-
-      - name: "📊 Extract Secret Statistics"
+      - name: "Extract Secret Statistics"
         id: secret-stats
         run: |
           if [ -f trufflehog.json ]; then
@@ -325,9 +324,9 @@ jobs:
           fi
           echo "total=${TOTAL}" >> "$GITHUB_OUTPUT"
           echo "verified=${VERIFIED}" >> "$GITHUB_OUTPUT"
-          echo "🔐 Secrets: ${TOTAL} total, ${VERIFIED} verified"
+          echo "Secrets: ${TOTAL} total, ${VERIFIED} verified"
 
-      - name: "💾 Upload Secret Scan Results"
+      - name: "Upload Secret Scan Results"
         uses: actions/upload-artifact@v4
         with:
           name: secret-scan-results
@@ -338,7 +337,7 @@ jobs:
   # Stage 4: Policy Enforcement (Waits for all scans)
   # ============================================
   policy-enforcement:
-    name: "4️⃣ Security Policy Enforcement (OPA)"
+    name: "Security Policy Enforcement (OPA)"
     runs-on: ubuntu-latest
     timeout-minutes: 5
     needs: [prepare, build-container, scan-vulnerabilities, scan-sast, scan-secrets]
@@ -355,43 +354,41 @@ jobs:
       policy_decision: ${{ steps.opa_eval.outputs.decision }}
 
     steps:
-      - name: "⏱️ Record Policy Check Start"
+      - name: "Record Policy Check Start"
         id: policy-start
         run: echo "time=$(date +%s)" >> "$GITHUB_OUTPUT"
 
-      - name: "📋 Checkout Repository (for policy files)"
+      - name: "Checkout Repository (for policy files)"
         uses: actions/checkout@v4
 
-      - name: "⬇️ Download Security Reports"
+      - name: "Download Security Reports"
         uses: actions/download-artifact@v4
         with:
           name: sbom
 
-      - name: "⬇️ Download Vulnerability Results"
+      - name: "Download Vulnerability Results"
         uses: actions/download-artifact@v4
         with:
           name: vulnerability-results
 
-      - name: "⬇️ Download SAST Results"
+      - name: "Download SAST Results"
         uses: actions/download-artifact@v4
         with:
           name: sast-results
 
-      - name: "⬇️ Download Secret Scan Results"
+      - name: "Download Secret Scan Results"
         uses: actions/download-artifact@v4
         with:
           name: secret-scan-results
 
-      - name: "🛡️ Install OPA"
-        run: |
-          curl -L -o opa https://github.com/open-policy-agent/opa/releases/latest/download/opa_linux_amd64
-          chmod +x opa
-          sudo mv opa /usr/local/bin
-          opa version
+      - name: "🛡️ Setup OPA (Pinned)"
+        uses: open-policy-agent/setup-opa@v2
+        with:
+          version: 1.12.3
+      
 
-      - name: "📋 Create OPA Input File"
+      - name: "Create OPA Input File"
         run: |
-          # Use actual job results instead of hardcoded compliance data
           cat > input.json << EOF
           {
             "image": {
@@ -433,12 +430,12 @@ jobs:
           }
           EOF
 
-      - name: "🔒 Evaluate Security Policy (Single Pass)"
+      - name: "Evaluate Security Policy (Single Pass)"
         id: opa_eval
         run: |
           set -e
           echo ""
-          echo "🛡️ ===== SECURITY POLICY EVALUATION ====="
+          echo "===== SECURITY POLICY EVALUATION ====="
           
           # Single OPA evaluation for all data
           opa eval -i input.json -d ./policy 'data.main' --format=json > policy-result.json
@@ -453,7 +450,7 @@ jobs:
           echo "warnings=${WARNINGS}" >> "$GITHUB_OUTPUT"
           
           echo ""
-          echo "📊 ===== POLICY EVALUATION RESULTS ====="
+          echo "===== POLICY EVALUATION RESULTS ====="
           echo "   Compliance Status: ${PASSED}"
           echo "   Violations: ${VIOLATIONS}"
           echo "   Warnings: ${WARNINGS}"
@@ -461,33 +458,33 @@ jobs:
           
           if [ "$VIOLATIONS" -gt 0 ]; then
             echo ""
-            echo "❌ POLICY VIOLATIONS DETECTED:"
-            jq -r '.result[0].expressions[0].value.deny[] | "   ❌ [\(.type)] \(.msg)"' policy-result.json
+            echo "POLICY VIOLATIONS DETECTED:"
+            jq -r '.result[0].expressions[0].value.deny[] | "   [\(.type)] \(.msg)"' policy-result.json
           fi
           
           if [ "$WARNINGS" -gt 0 ]; then
             echo ""
-            echo "⚠️  POLICY WARNINGS:"
-            jq -r '.result[0].expressions[0].value.warnings[] | "   ⚠️  [\(.type)] \(.msg)"' policy-result.json
+            echo "POLICY WARNINGS:"
+            jq -r '.result[0].expressions[0].value.warnings[] | "   [\(.type)] \(.msg)"' policy-result.json
           fi
           
           echo ""
-          echo "📋 DETAILED COMPLIANCE REPORT:"
+          echo "DETAILED COMPLIANCE REPORT:"
           echo "$COMPLIANCE" | jq '.'
           
           if [ "$PASSED" = "true" ]; then
             echo "decision=APPROVED" >> "$GITHUB_OUTPUT"
             echo ""
-            echo "✅ ===== POLICY CHECK PASSED ====="
+            echo "===== POLICY CHECK PASSED ====="
             echo "   Image meets security requirements"
             exit 0
           else
             echo "decision=REJECTED" >> "$GITHUB_OUTPUT"
             echo ""
-            echo "❌ ===== POLICY CHECK FAILED ====="
+            echo "===== POLICY CHECK FAILED ====="
             echo "   Deployment is BLOCKED."
             echo ""
-            echo "   📊 Summary:"
+            echo "   Summary:"
             echo "   - CVE Critical: $(echo "$COMPLIANCE" | jq -r '.cve.critical // 0')"
             echo "   - CVE High: $(echo "$COMPLIANCE" | jq -r '.cve.high // 0')"
             echo "   - SAST Critical: $(echo "$COMPLIANCE" | jq -r '.sast.critical // 0')"
@@ -495,12 +492,12 @@ jobs:
             exit 1
           fi
 
-      - name: "⏱️ Record Policy Check End"
+      - name: "Record Policy Check End"
         id: policy-end
         if: always()
         run: echo "time=$(date +%s)" >> "$GITHUB_OUTPUT"
 
-      - name: "💾 Upload Policy Results"
+      - name: "Upload Policy Results"
         uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -514,7 +511,7 @@ jobs:
   # Stage 5: Metrics & Reporting
   # ============================================
   metrics-and-report:
-    name: "5️⃣ Generate Security Report"
+    name: "Generate Security Report"
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: [prepare, build-container, scan-vulnerabilities, scan-sast, scan-secrets, policy-enforcement]
@@ -523,13 +520,13 @@ jobs:
       contents: read
 
     steps:
-      - name: "📋 Checkout Repository"
+      - name: "Checkout Repository"
         uses: actions/checkout@v4
 
-      - name: "⬇️ Download All Results"
+      - name: "Download All Results"
         uses: actions/download-artifact@v4
 
-      - name: "📊 Calculate Pipeline Metrics"
+      - name: "Calculate Pipeline Metrics"
         id: calculate
         run: |
           BUILD_START=${{ needs.prepare.outputs.build_start_time || '0' }}
@@ -548,7 +545,7 @@ jobs:
           echo "policy_duration=${POLICY_DURATION}" >> "$GITHUB_OUTPUT"
           echo "total_duration=${TOTAL_DURATION}" >> "$GITHUB_OUTPUT"
 
-      - name: "📊 Generate Consolidated Security Report"
+      - name: "Generate Consolidated Security Report"
         run: |
           mkdir -p reports
           TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
@@ -686,19 +683,19 @@ jobs:
           *Generated: $(date -u +"%Y-%m-%d %H:%M:%S UTC")*
           EOF
 
-      - name: "💾 Upload Consolidated Report"
+      - name: "Upload Consolidated Report"
         uses: actions/upload-artifact@v4
         with:
           name: security-report
           path: reports/
           retention-days: 90
 
-      - name: "📊 Publish GitHub Step Summary"
+      - name: "Publish GitHub Step Summary"
         if: always()
         run: |
           cat "reports/security-report-${{ github.run_number }}.md" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: "📤 Update Dashboard Data (JSON)"
+      - name: "Update Dashboard Data (JSON)"
         env:
           GH_TOKEN: ${{ secrets.DASHBOARD_PAT }}
         run: |
